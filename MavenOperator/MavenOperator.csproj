@@ -4,19 +4,24 @@
         <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
-        <InvariantGlobalization>true</InvariantGlobalization>
-        <PublishAot>true</PublishAot>
         <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+        <!-- AOT is disabled: KubeOps uses reflection-based CRD generation -->
+        <PublishAot>false</PublishAot>
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1"/>
+        <!-- KubeOps v10 — operator runtime + web hooks + CRD transpiler -->
+        <PackageReference Include="KubeOps.Operator"         Version="10.5.0" />
+        <PackageReference Include="KubeOps.Operator.Web"     Version="10.5.0" />
+        <PackageReference Include="KubeOps.Transpiler"       Version="10.5.0" />
+        <!-- OpenAPI kept for health/diagnostics endpoints -->
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
     </ItemGroup>
 
     <ItemGroup>
-      <Content Include="..\.dockerignore">
-        <Link>.dockerignore</Link>
-      </Content>
+        <Content Include="..\.dockerignore">
+            <Link>.dockerignore</Link>
+        </Content>
     </ItemGroup>
 
 </Project>

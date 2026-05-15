@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="MavenOperator.Tests.Unit/MavenOperator.Tests.Unit.csproj" />
   <Project Path="MavenOperator/MavenOperator.csproj" />
 </Solution>
