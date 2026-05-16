@@ -56,18 +56,17 @@ jobs:
           name: test-results
           path: "**/*.trx"
 
-  # ── Docker images ───────────────────────────────────────────────────────────
-  docker:
-    name: Build & Push Docker Images
+  # ── Docker build (produces tarballs for downstream test jobs) ───────────────
+  # Images are NOT pushed here — pushing happens in the release job only after
+  # all tests pass.
+  docker-build:
+    name: Build Docker Images
     runs-on: ubuntu-latest
     needs: build-and-test
     permissions:
       contents: read
-      packages: write
 
     outputs:
-      operator_digest: ${{ steps.push-operator.outputs.digest }}
-      proxy_digest: ${{ steps.push-proxy.outputs.digest }}
       image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
@@ -75,14 +74,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image metadata (operator)
         id: meta
@@ -108,35 +99,31 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
 
-      - name: Build & push operator image
-        id: push-operator
+      - name: Build operator image (export tarball only)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Also export a local tarball so downstream jobs can load it without
-          # needing GHCR access or a rebuild.
           outputs: type=docker,dest=/tmp/maven-operator.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build & push virtual-proxy image
-        id: push-proxy
+      - name: Build virtual-proxy image (export tarball only)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator.VirtualProxy/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false
           tags: ${{ steps.meta-proxy.outputs.tags }}
           labels: ${{ steps.meta-proxy.outputs.labels }}
           outputs: type=docker,dest=/tmp/maven-virtual-proxy.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Re-tag tarballs with the stable local name used by test scripts.
+      # Re-tag with stable local names used by run-tests.sh
       - name: Re-tag images with stable local names
         run: |
           docker load -i /tmp/maven-operator.tar
@@ -154,63 +141,13 @@ jobs:
           path: |
             /tmp/maven-operator.tar
             /tmp/maven-virtual-proxy.tar
-          # Images are only needed by jobs in the same run; 1-day retention is enough.
           retention-days: 1
-
-  # ── Helm chart ──────────────────────────────────────────────────────────────
-  helm:
-    name: Lint, Package & Push Helm Chart
-    runs-on: ubuntu-latest
-    needs: docker
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v5
-        with:
-          version: "3.17.3"
-
-      - name: Lint Helm chart
-        run: helm lint charts/maven-operator
-
-      - name: Update appVersion in Chart.yaml from image tag
-        if: github.event_name != 'pull_request'
-        run: |
-          TAG="${{ needs.docker.outputs.image_tag }}"
-          if [[ -n "$TAG" ]]; then
-            sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" charts/maven-operator/Chart.yaml
-          fi
-
-      - name: Package Helm chart
-        run: helm package charts/maven-operator --destination /tmp/helm-packages
-
-      - name: Log in to GHCR (Helm OCI)
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
-            --username ${{ github.actor }} \
-            --password-stdin
-
-      - name: Push Helm chart to GHCR
-        if: github.event_name != 'pull_request'
-        run: |
-          helm push /tmp/helm-packages/*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
-
-      - name: Upload Helm package as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-chart
-          path: /tmp/helm-packages/*.tgz
 
   # ── Integration tests (on push to main only, requires k3d) ─────────────────
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    needs: docker
+    needs: docker-build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -252,11 +189,18 @@ jobs:
         run: |
           ./scripts/run-tests.sh integration --cleanup
 
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: "**/*.trx"
+
   # ── E2E tests (on push to main only, requires k3d + Maven/Gradle) ──────────
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    needs: docker
+    needs: docker-build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -321,11 +265,13 @@ jobs:
           name: e2e-test-results
           path: "**/*.trx"
 
-  # ── Performance tests (on push to main only) ────────────────────────────────
+  # ── Performance tests (smoke + benchmarks; k6 load tests run locally only) ──
+  # k6 load tests require dedicated infrastructure and are not run in CI.
+  # Use --perf-mode load manually against a real cluster for load testing.
   performance:
     name: Performance Tests
     runs-on: ubuntu-latest
-    needs: docker
+    needs: docker-build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -341,25 +287,6 @@ jobs:
       - name: Restore
         run: dotnet restore
 
-      - name: Install k3d
-        run: |
-          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-          k3d version
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Install k6
-        run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
-            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
-            | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update -qq
-          sudo apt-get install -y k6
-          k6 version
-
       - name: Download pre-built Docker images
         uses: actions/download-artifact@v4
         with:
@@ -371,12 +298,19 @@ jobs:
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
 
-      - name: Run performance tests (smoke + benchmark + load)
+      - name: Run performance smoke tests (xUnit ceilings)
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
         run: |
-          ./scripts/run-tests.sh performance --perf-mode all --cleanup
+          ./scripts/run-tests.sh performance --perf-mode smoke
+
+      - name: Run BenchmarkDotNet micro-benchmarks
+        env:
+          OPERATOR_IMAGE: maven-operator:ci
+          VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+        run: |
+          ./scripts/run-tests.sh performance --perf-mode benchmark
 
       - name: Upload performance test results
         if: always()
@@ -385,6 +319,112 @@ jobs:
           name: performance-test-results
           path: |
             **/*.trx
-            **/BenchmarkDotNet.Artifacts/**
-            MavenOperator.Tests.Performance/k6/**/*.json
+            .benchmarks/BenchmarkDotNet.Artifacts/**
 
+  # ── Release: push images + publish Helm chart (only when ALL tests pass) ────
+  release:
+    name: Push Images & Publish Helm Chart
+    runs-on: ubuntu-latest
+    # Only run on push to main or a version tag — never on PRs.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Gate on every test job. If any of them is skipped (PR), this is also skipped.
+    needs: [build-and-test, docker-build, integration, e2e, performance]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata (operator)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.OPERATOR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Compute image metadata (virtual proxy)
+        id: meta-proxy
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PROXY_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      # Re-use the GHA layer cache — images were already cached by docker-build.
+      - name: Push operator image to GHCR
+        id: push-operator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push virtual-proxy image to GHCR
+        id: push-proxy
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.VirtualProxy/Dockerfile
+          push: true
+          tags: ${{ steps.meta-proxy.outputs.tags }}
+          labels: ${{ steps.meta-proxy.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: "3.17.3"
+
+      - name: Lint Helm chart
+        run: helm lint charts/maven-operator
+
+      - name: Update appVersion in Chart.yaml from image tag
+        run: |
+          TAG="${{ steps.meta.outputs.version }}"
+          if [[ -n "$TAG" ]]; then
+            sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" charts/maven-operator/Chart.yaml
+          fi
+
+      - name: Package Helm chart
+        run: helm package charts/maven-operator --destination /tmp/helm-packages
+
+      - name: Log in to GHCR (Helm OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} \
+            --password-stdin
+
+      - name: Push Helm chart to GHCR
+        run: |
+          helm push /tmp/helm-packages/*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Upload Helm package as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: /tmp/helm-packages/*.tgz
