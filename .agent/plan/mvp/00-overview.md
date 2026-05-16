@@ -64,4 +64,7 @@ The end user experience is simple:
 | 07 | [C# Aggregation Proxy](./07-csharp-aggregation-proxy.md) | Virtual repo proxy design |
 | 08 | [Storage](./08-storage.md) | PVC strategy, volume mounts |
 | 09 | [Milestones](./09-milestones.md) | Phased delivery plan |
+| 10 | [Phase 6 — Deep Observability & Enhanced Auth](./10-phase6-observability.md) | Per-artifact NGINX metrics, sidecars, OIDC, roles, ACLs |
+| 11 | [NGINX Metrics Design](./11-nginx-metrics.md) | JSON log format, mtail program, stub_status, sidecar spec |
+| 12 | [Grafana Dashboards & Alert Rules](./12-dashboards-alerts.md) | Dashboard panel spec, PrometheusRule alerts, recording rules |
 

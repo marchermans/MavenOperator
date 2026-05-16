@@ -45,6 +45,52 @@
 
 ---
 
+## Phase 6 — Deep Observability & Enhanced Authentication (Week 11-13)
+
+See `10-phase6-observability.md` for the full design.
+
+### Part A — Deep Observability
+
+- [ ] Extend NGINX config templates with structured JSON access log format and `map` directives for Maven coordinate extraction (see `11-nginx-metrics.md`)
+- [ ] Add internal `stub_status` server block to all NGINX pod configs
+- [ ] Operator injects `nginx/nginx-prometheus-exporter` sidecar into NGINX pods when `spec.metrics.enabled: true`
+- [ ] Operator injects `mtail` sidecar with a per-repo `ConfigMap` containing the mtail program
+- [ ] Operator creates additional named `Service` ports (`nginx-metrics:9113`, `mtail-metrics:3903`)
+- [ ] Operator creates `PodMonitor` resources when prometheus-operator CRDs are detected and `metrics.podMonitor.enabled: true`
+- [ ] Add `spec.metrics.*` sub-spec to CRD schema with CEL validation
+- [ ] Add Helm values for sidecar images, resource limits, podMonitor toggle, Grafana toggle
+- [ ] Ship 4 Grafana dashboards as Helm ConfigMaps (opt-in, see `12-dashboards-alerts.md`)
+- [ ] Ship PrometheusRule with 5 recording rules + 9 alert rules (opt-in, see `12-dashboards-alerts.md`)
+- [ ] Unit tests: `NginxConfigRenderer` produces correct log_format, map directives, stub_status block
+- [ ] Unit tests: mtail program parses sample log lines and produces correct metric values
+- [ ] Integration tests: scrape `:9113/metrics` and `:3903/metrics` — assert non-zero values after reconcile
+- [ ] E2E tests: `mvn deploy` → verify `maven_artifact_requests_total{method="PUT"}` increments; `mvn dependency:resolve` → verify GET counter
+
+**Done when:** After deploying a repo and running a Maven build, all four dashboards
+render correctly in Grafana, all alerts are present in Prometheus, and artifact-level
+metrics are visible per repository.
+
+### Part B — Enhanced Authentication
+
+- [ ] Extend CRD schema with `auth.users[].role` (reader/deployer/admin) — backward-compatible with existing `auth.*.secretRefs`
+- [ ] `RoleBasedHtpasswdService`: filters users by role when building download/upload htpasswd files
+- [ ] Extend CRD schema with `auth.oidc` sub-spec (issuerUrl, clientId, clientSecretRef, scopes)
+- [ ] New project `MavenOperator.AuthProxy` — ASP.NET Core OIDC JWT validation sidecar
+- [ ] Operator injects `maven-auth-proxy` sidecar and renders `auth_request` NGINX config block when `auth.oidc.enabled: true`
+- [ ] Extend CRD schema with `auth.acls[]` (path glob, allowed roles for download/upload)
+- [ ] `NginxConfigRenderer` renders ACL `location` blocks ordered by longest-prefix-first
+- [ ] Admission webhook validates: no duplicate usernames, OIDC fields mutually exclusive with htpasswd-only policies, ACL paths are valid globs
+- [ ] Token issuance endpoint (`POST /api/v1/tokens`) — short-lived JWTs signed by operator key pair
+- [ ] Unit tests: role filtering, ACL specificity ordering, JWT validation, token issuance/validation
+- [ ] Integration tests: OIDC flow with local Dex instance in k3d; verify 401/403 on wrong credentials/role
+- [ ] E2E tests: ACL enforcement (403 on wrong path), token-based `mvn deploy` without long-lived Secrets
+
+**Done when:** A `MavenRepository` with `auth.oidc.enabled: true` correctly
+delegates auth to Dex, enforces role-based upload/download, and a CI pipeline
+can obtain a short-lived token and use it to deploy artifacts.
+
+---
+
 ## Testing Strategy (applies to every phase)
 
 Testing is the **primary validation metric**. A phase is not complete until its tests pass.
@@ -77,8 +123,12 @@ MavenOperator.Tests.Performance/   # BenchmarkDotNet benchmarks + k6 scripts
 ---
 
 ## Out of Scope for MVP
-- LDAP / OIDC authentication (planned for v1beta1).
+- LDAP authentication (planned for Phase 7).
 - `MavenRepositoryBackup` CRD.
 - Web UI / dashboard.
 - Artifact search / indexing.
 - Quota enforcement per repo.
+
+> OIDC authentication, role-based access, and per-artifact-path ACLs are now
+> **in-scope for Phase 6**. See `10-phase6-observability.md` and `04-authentication.md`.
+
