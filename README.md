@@ -549,5 +549,7 @@ ConfigMaps, and Secrets (except PVCs when `deletionPolicy: Retain`).
 | 3 | ✅ Done | Virtual repository (fan-out + metadata merge) |
 | 4 | ✅ Done | CEL validation, Events, Secret watch, deletionPolicy, Ingress |
 | 5 | ✅ Done | Prometheus metrics, Helm chart, GitHub Actions CI |
-| 6 | 🔜 Planned | Grafana dashboards, alert rules, Helm chart on ArtifactHub |
+| 6A | 🔜 Planned | **Deep observability** — per-artifact NGINX metrics via `nginx-prometheus-exporter` + `mtail` sidecars; `PodMonitor`; Grafana dashboards; PrometheusRule alert rules |
+| 6B | 🔜 Planned | **Enhanced authentication** — role-based access (reader/deployer/admin); CI platform OIDC trust (GitHub Actions & GitLab CI JWTs, no pre-provisioned secrets); per-artifact-path ACLs |
+| 7 | 💡 Idea | LDAP authentication, ArtifactHub listing, Grafana community dashboards |
 
