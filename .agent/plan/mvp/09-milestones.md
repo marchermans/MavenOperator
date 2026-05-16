@@ -73,21 +73,28 @@ metrics are visible per repository.
 ### Part B — Enhanced Authentication
 
 - [ ] Extend CRD schema with `auth.users[].role` (reader/deployer/admin) — backward-compatible with existing `auth.*.secretRefs`
+- [ ] Extend CRD schema with `auth.ciTrust[]` — multi-issuer CI platform OIDC trust bindings (platform, issuerUrl, audience, role, claims map)
+- [ ] CEL admission validation: `ciTrust[].claims` must be non-empty; `platform` and `role` must be valid enums; `issuerUrl` must be HTTPS when set
 - [ ] `RoleBasedHtpasswdService`: filters users by role when building download/upload htpasswd files
-- [ ] Extend CRD schema with `auth.oidc` sub-spec (issuerUrl, clientId, clientSecretRef, scopes)
-- [ ] New project `MavenOperator.AuthProxy` — ASP.NET Core OIDC JWT validation sidecar
-- [ ] Operator injects `maven-auth-proxy` sidecar and renders `auth_request` NGINX config block when `auth.oidc.enabled: true`
-- [ ] Extend CRD schema with `auth.acls[]` (path glob, allowed roles for download/upload)
-- [ ] `NginxConfigRenderer` renders ACL `location` blocks ordered by longest-prefix-first
-- [ ] Admission webhook validates: no duplicate usernames, OIDC fields mutually exclusive with htpasswd-only policies, ACL paths are valid globs
-- [ ] Token issuance endpoint (`POST /api/v1/tokens`) — short-lived JWTs signed by operator key pair
-- [ ] Unit tests: role filtering, ACL specificity ordering, JWT validation, token issuance/validation
-- [ ] Integration tests: OIDC flow with local Dex instance in k3d; verify 401/403 on wrong credentials/role
-- [ ] E2E tests: ACL enforcement (403 on wrong path), token-based `mvn deploy` without long-lived Secrets
+- [ ] New project `MavenOperator.AuthProxy` — ASP.NET Core sidecar handling both HTTP Basic Auth (htpasswd) and Bearer JWT (CI platform OIDC)
+- [ ] `IJwksCache` service: per-issuer JWKS fetch and cache (1h TTL); force-refresh on unknown `kid` (key rotation)
+- [ ] `ITrustEvaluator` service: evaluate `ciTrust` bindings against JWT claims — glob matching, ordered first-match, audience enforcement
+- [ ] `IOptionsMonitor<AuthProxyConfig>` hot-reload from ConfigMap — no sidecar restart required on binding changes
+- [ ] Operator renders auth proxy ConfigMap from `ciTrust` spec and injects `maven-auth-proxy` sidecar into NGINX pods when `ciTrust` is non-empty
+- [ ] `NginxConfigRenderer`: renders `auth_request /auth/validate` block (replaces `auth_basic` when `ciTrust` is non-empty)
+- [ ] ACL location block rendering (ordered by longest-prefix-first)
+- [ ] Unit tests: `TrustEvaluator` — GitHub Actions claims, GitLab CI claims, glob wildcards, first-match semantics, empty-claims rejection, audience mismatch → 403
+- [ ] Unit tests: `JwksCache` — cache hit path, cache miss (HTTP fetch), force-refresh on unknown kid, HTTPS-only issuer URL
+- [ ] Unit tests: `RoleBasedHtpasswdService` — role filtering correctness
+- [ ] Unit tests: ACL `location` block specificity ordering
+- [ ] Integration tests: synthetic GitHub-format pre-signed JWT → 200 with correct role; wrong `repository` claim → 403; expired JWT → 401; unknown issuer → 403
+- [ ] Integration tests: synthetic GitLab-format pre-signed JWT → 200 with correct role; `ref_protected: false` when binding requires `true` → 403
+- [ ] E2E tests: GitHub-format JWT in Authorization header → `mvn deploy` succeeds end-to-end; wrong repo claim → 403 from NGINX
+- [ ] Backward-compatibility: existing `auth.download.secretRefs` still works without any `ciTrust` bindings
 
-**Done when:** A `MavenRepository` with `auth.oidc.enabled: true` correctly
-delegates auth to Dex, enforces role-based upload/download, and a CI pipeline
-can obtain a short-lived token and use it to deploy artifacts.
+**Done when:** A GitHub Actions workflow and a GitLab CI pipeline can each deploy
+artifacts to a `MavenRepository` using only their platform-issued OIDC JWT —
+no Kubernetes Secrets, no operator-issued tokens, no pre-provisioned credentials.
 
 ---
 

@@ -244,16 +244,25 @@ Summary of PrometheusRule alerts shipped:
 ### B.1 Motivation
 
 Phase 4 delivered multi-user htpasswd with separate download/upload policies.
-This is sufficient for small teams. Phase 6 adds:
+This is sufficient for human users and small teams. Phase 6 adds:
 
 1. **Role-based access** — predefined roles (`reader`, `deployer`, `admin`) mapped
    to download/upload permissions, reducing repetition in large deployments.
-2. **OIDC delegation** — delegate authentication to an external OIDC provider
-   (Dex, Keycloak, GitHub OIDC) using NGINX's `auth_request` sub-request.
-3. **Per-artifact-path ACLs** — restrict upload or download to specific Maven group
-   coordinate prefixes (e.g. `com.example.*` only).
-4. **Token-based auth** — short-lived bearer tokens issued by the operator, reducing
-   secret rotation burden for CI pipelines.
+2. **CI platform OIDC trust** — accept the short-lived OIDC tokens that GitHub
+   Actions and GitLab CI already mint for every job, without any pre-provisioned
+   secrets. Trust is configured by declaring which repositories/projects from which
+   platforms are allowed, and which role they receive.
+3. **Per-artifact-path ACLs** — restrict upload or download to specific Maven
+   coordinate prefixes (e.g. `com.example.*` only), evaluated after role assignment.
+
+The key insight for CI authentication: GitHub Actions and GitLab CI **already
+issue short-lived OIDC JWTs** to every job run. These tokens carry rich,
+verifiable identity claims (`repository`, `ref`, `environment`, `project_path`,
+`ref_protected`, etc.). There is no need to issue operator-owned tokens — instead
+the auth proxy becomes a **multi-issuer OIDC trust evaluator** that maps platform
+claims to local roles.
+
+---
 
 ### B.2 Role-based access
 
@@ -290,58 +299,273 @@ htpasswd.
 > `auth.upload.secretRefs` lists continue to work unchanged (all users get the
 > implicit `deployer` role when referenced via the legacy path).
 
-### B.3 OIDC delegation via auth_request
+---
 
-When `auth.oidc.enabled: true`, NGINX is configured to use `auth_request` to
-delegate every request to a lightweight **auth sidecar** (the operator deploys
-a small Go/C# sidecar — `maven-auth-proxy`) that validates OIDC JWTs.
+### B.3 CI platform OIDC trust — design
+
+#### B.3.1 How CI platform OIDC works
+
+Both GitHub Actions and GitLab CI expose an OIDC provider that mints a short-lived
+JWT for every job run. These tokens are standard RS256-signed JWTs verifiable
+against the platform's public JWKS endpoint — no secrets to pre-provision.
+
+| Platform | OIDC Issuer | JWKS endpoint | Key identity claims |
+|----------|-------------|---------------|---------------------|
+| GitHub Actions | `https://token.actions.githubusercontent.com` | `https://token.actions.githubusercontent.com/.well-known/jwks` | `repository`, `repository_owner`, `ref`, `environment`, `job_workflow_ref`, `event_name` |
+| GitLab.com | `https://gitlab.com` | `https://gitlab.com/oauth/discovery/keys` | `project_path`, `namespace_path`, `ref`, `ref_protected`, `environment`, `ref_type` |
+| GitLab self-managed | `https://<your-gitlab-host>` | `https://<host>/oauth/discovery/keys` | same as above |
+
+GitHub Actions example token claims:
+```json
+{
+  "iss": "https://token.actions.githubusercontent.com",
+  "sub": "repo:acme-org/my-service:environment:prod",
+  "repository": "acme-org/my-service",
+  "repository_owner": "acme-org",
+  "workflow": "release.yml",
+  "ref": "refs/heads/main",
+  "ref_type": "branch",
+  "environment": "prod",
+  "job_workflow_ref": "acme-org/my-service/.github/workflows/release.yml@refs/heads/main",
+  "event_name": "push"
+}
+```
+
+GitLab CI example token claims:
+```json
+{
+  "iss": "https://gitlab.com",
+  "sub": "project_path:acme-group/my-service:ref_type:branch:ref:main",
+  "project_path": "acme-group/my-service",
+  "namespace_path": "acme-group",
+  "ref": "main",
+  "ref_type": "branch",
+  "ref_protected": "true",
+  "environment": "production"
+}
+```
+
+#### B.3.2 Trust policy model
+
+The `MavenRepository` CRD gains a new `auth.ciTrust` list. Each entry declares
+one **trust binding**: a set of claim matchers against a specific OIDC issuer,
+and the role that matching tokens receive.
 
 ```yaml
 auth:
-  oidc:
-    enabled: true
-    issuerUrl: https://accounts.google.com
-    clientId: maven-operator
-    clientSecretRef: oidc-client-secret
-    downloadScopes: ["openid", "maven:read"]
-    uploadScopes:   ["openid", "maven:write"]
+  ciTrust:
+    # GitHub Actions: the release workflow on main from acme-org/my-service gets deployer
+    - platform: github-actions
+      role: deployer
+      claims:
+        repository: "acme-org/my-service"
+        ref: "refs/heads/main"
+        event_name: "push"
+
+    # GitHub Actions: any workflow from the acme-org org on a protected tag gets deployer
+    - platform: github-actions
+      role: deployer
+      claims:
+        repository_owner: "acme-org"
+        ref_type: "tag"
+
+    # GitHub Actions: read-only access for all PRs from any acme-org repo
+    - platform: github-actions
+      role: reader
+      claims:
+        repository_owner: "acme-org"
+        event_name: "pull_request"
+
+    # GitLab.com: any pipeline from acme-group/my-service on a protected ref
+    - platform: gitlab
+      role: deployer
+      claims:
+        project_path: "acme-group/my-service"
+        ref_protected: "true"
+
+    # GitLab self-managed instance: group-level deployer access
+    - platform: gitlab
+      issuerUrl: "https://gitlab.internal.acme.com"   # overrides default gitlab.com
+      role: deployer
+      claims:
+        namespace_path: "acme-group"
+        ref: "main"
 ```
 
-NGINX config pattern:
+Claim matching rules:
+- All claims listed in a binding must match (AND logic).
+- String values are matched exactly (case-sensitive).
+- A `*` glob wildcard is supported for prefix/suffix matching (e.g. `repository: "acme-org/*"`).
+- Multiple bindings are evaluated in order; the **first match wins**.
+- If no binding matches the token, authentication fails with `403 Forbidden`.
 
-```nginx
-location /repository/my-releases/ {
-    auth_request /auth/validate;
-    auth_request_set $auth_user $upstream_http_x_auth_user;
-    auth_request_set $auth_role $upstream_http_x_auth_role;
+#### B.3.3 `audience` (aud) claim handling
 
-    limit_except GET HEAD OPTIONS {
-        # Upload requires deployer or admin role (returned in header by auth sidecar)
-        set $upload_allowed 0;
-        if ($auth_role = "deployer") { set $upload_allowed 1; }
-        if ($auth_role = "admin")    { set $upload_allowed 1; }
-        if ($upload_allowed = 0)     { return 403; }
-    }
-    # ... WebDAV directives
-}
+Both platforms allow the caller to set the `aud` claim of the minted token. The
+auth proxy enforces that the `aud` matches a configurable expected value to prevent
+token reuse across services:
 
-location /auth/validate {
-    internal;
-    proxy_pass http://localhost:9200/validate;
-    proxy_pass_request_body off;
-    proxy_set_header Content-Length "";
-    proxy_set_header X-Original-URI $request_uri;
-    proxy_set_header X-Original-Method $request_method;
+```yaml
+auth:
+  ciTrust:
+    - platform: github-actions
+      audience: "https://maven.acme.com"   # CI workflow must request this aud
+      role: deployer
+      claims:
+        repository: "acme-org/my-service"
+```
+
+If `audience` is omitted in the binding, the auth proxy accepts any `aud` value —
+acceptable for internal clusters not exposed externally.
+
+#### B.3.4 CRD schema additions
+
+```yaml
+spec:
+  auth:
+    # Existing htpasswd users (unchanged)
+    users:
+      - secretRef: alice-credentials
+        role: reader
+
+    # New: CI platform trust bindings
+    ciTrust:
+      - platform: github-actions    # string enum: github-actions | gitlab
+        issuerUrl: ""               # optional override; empty = platform default
+        audience: ""                # optional aud claim to enforce
+        role: deployer              # string enum: reader | deployer | admin
+        claims:                     # map[string]string — all must match
+          repository: "acme-org/my-service"
+          ref: "refs/heads/main"
+```
+
+CEL validation rules on `auth.ciTrust[]`:
+- `platform` must be `github-actions` or `gitlab`
+- `role` must be one of `reader`, `deployer`, `admin`
+- `claims` must be non-empty (a binding with no claim constraints would grant
+  the role to **any** token from that issuer — rejected at admission time)
+- If `platform == github-actions` and `issuerUrl` is set, the URL must use HTTPS
+
+---
+
+### B.4 The auth sidecar (`maven-auth-proxy`)
+
+The same `maven-auth-proxy` ASP.NET Core sidecar introduced for OIDC in B.3 handles
+both htpasswd Basic Auth fallback and CI platform JWT validation in a single process.
+
+#### Request flow
+
+```
+Maven client                NGINX              maven-auth-proxy
+     │                        │                      │
+     │─── GET /repo/... ──────▶│                      │
+     │                        │─── auth_request ──────▶│
+     │                        │    (headers forwarded) │
+     │                        │                        │── 1. Extract Authorization header
+     │                        │                        │── 2. Bearer token?
+     │                        │                        │      Yes → validate JWT
+     │                        │                        │        a. Decode issuer claim
+     │                        │                        │        b. Fetch JWKS (cached)
+     │                        │                        │        c. Verify signature
+     │                        │                        │        d. Evaluate ciTrust bindings
+     │                        │                        │        e. Return role in X-Auth-Role
+     │                        │                        │      No → Basic Auth → htpasswd check
+     │                        │                        │── 3. Return 200 + X-Auth-Role
+     │                        │◀── 200 X-Auth-Role ────│
+     │                        │── apply role check ───▶│
+     │◀── 200 artifact ────────│                      │
+```
+
+#### JWKS caching
+
+The auth proxy caches JWKS key sets in-process keyed by issuer URL. Cache entries
+expire after 1 hour (configurable). On JWT validation failure due to unknown key ID
+(`kid`), the proxy immediately re-fetches JWKS (handles key rotation).
+
+```csharp
+// Pseudocode — JwksCache service
+public class JwksCache : IJwksCache
+{
+    // Cache: issuerUrl → (JsonWebKeySet, fetchedAt)
+    // TTL: 1 hour; force-refresh on unknown kid
+    Task<JsonWebKeySet> GetOrFetchAsync(string issuerUrl, string kid, CancellationToken ct);
 }
 ```
 
-The auth sidecar (`maven-auth-proxy`) is a minimal ASP.NET Core service that:
-- Validates the `Authorization: Bearer <jwt>` header against the OIDC provider's JWKS endpoint
-- Returns `200` with `X-Auth-User` and `X-Auth-Role` headers on success
-- Returns `401` on missing/invalid token
-- Caches validated tokens in-process for the JWT's remaining TTL (reducing OIDC round-trips)
+#### Trust binding evaluation
 
-### B.4 Per-artifact-path ACLs
+```csharp
+// Pseudocode — TrustEvaluator service
+public class TrustEvaluator : ITrustEvaluator
+{
+    // Iterate ciTrust bindings in order.
+    // For each binding:
+    //   1. Check platform matches issuer URL
+    //   2. Check audience if specified
+    //   3. Check all claim matchers (glob-aware string match)
+    //   4. Return role on first match, null if no binding matches
+    string? EvaluateRole(JwtSecurityToken token, IReadOnlyList<CiTrustBinding> bindings);
+}
+```
+
+#### Configuration injection
+
+The operator renders the auth proxy's configuration as a ConfigMap containing
+the list of `ciTrust` bindings in JSON form, mounted into the sidecar at
+`/etc/maven-auth/config.json`. The operator reconciles this ConfigMap whenever
+the `MavenRepository` spec changes — the auth proxy watches the file and reloads
+without restart (using `IOptionsMonitor<T>`).
+
+---
+
+### B.5 Using CI platform OIDC in practice
+
+#### GitHub Actions workflow example
+
+```yaml
+# .github/workflows/deploy.yml
+jobs:
+  deploy:
+    permissions:
+      id-token: write   # required to request an OIDC token
+      contents: read
+    steps:
+      - name: Get Maven auth token
+        id: oidc
+        run: |
+          TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://maven.acme.com" \
+            | jq -r '.value')
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Maven repository
+        run: |
+          mvn deploy \
+            -Dmaven.wagon.http.headers.Authorization="Bearer ${{ steps.oidc.outputs.token }}"
+```
+
+NGINX passes the `Authorization: Bearer <jwt>` header to `maven-auth-proxy` via
+`auth_request`. The proxy validates the token, matches it against the `ciTrust`
+bindings, and returns `X-Auth-Role: deployer` to NGINX.
+
+#### GitLab CI pipeline example
+
+```yaml
+# .gitlab-ci.yml
+deploy:
+  id_tokens:
+    MAVEN_TOKEN:
+      aud: "https://maven.acme.com"
+  script:
+    - mvn deploy -Dmaven.wagon.http.headers.Authorization="Bearer $MAVEN_TOKEN"
+```
+
+No secrets required in either platform — only the trust binding in the
+`MavenRepository` CRD.
+
+---
+
+### B.6 Per-artifact-path ACLs
 
 Group-coordinate prefix restrictions added to the CRD:
 
@@ -353,46 +577,28 @@ auth:
       uploadRoles: [deployer, admin]      # allowed roles for upload
     - path: "org/apache/**"
       roles: [reader]                     # read-only for this subtree
-      uploadRoles: []                     # no uploads
+      uploadRoles: []                     # no uploads allowed
 ```
 
-These are translated into NGINX `location` blocks ordered by specificity. The
-operator renders them at reconcile time using a Scriban template. Overlapping
-paths resolve by longest-prefix wins (NGINX `location` precedence).
+ACLs apply after role assignment (from either htpasswd or CI platform token
+evaluation). NGINX `location` blocks are rendered ordered by longest-prefix-first.
 
-### B.5 Token-based auth
+---
 
-The operator exposes a new sub-resource API endpoint (as a Kubernetes aggregated
-API or a simple HTTP service):
-
-```
-POST /api/v1/tokens
-{
-  "repository": "releases",
-  "namespace": "my-repos",
-  "role": "deployer",
-  "ttl": "24h"
-}
-→ { "token": "mvn-tok-abc123...", "expiresAt": "2026-05-17T10:00:00Z" }
-```
-
-Tokens are short-lived JWTs signed by a per-operator key pair (stored in a
-Kubernetes Secret). The auth sidecar validates these tokens using the operator's
-public key, avoiding OIDC round-trips.
-
-CI pipelines request a fresh token at the start of each pipeline run and use it
-as the Maven/Gradle password — no long-lived password Secrets needed.
-
-### B.6 Authentication summary table
+### B.7 Authentication summary table
 
 | Feature | Phase 4 | Phase 6 |
 |---------|---------|---------|
 | HTTP Basic + htpasswd | ✅ | ✅ |
 | Multi-user per policy | ✅ | ✅ |
 | Role-based (reader/deployer/admin) | ❌ | ✅ |
-| OIDC / JWT delegation | ❌ | ✅ |
+| GitHub Actions OIDC trust | ❌ | ✅ |
+| GitLab CI OIDC trust | ❌ | ✅ |
+| Multi-issuer / self-managed GitLab | ❌ | ✅ |
+| Claim-based trust bindings (repo, ref, env…) | ❌ | ✅ |
+| Audience (`aud`) enforcement | ❌ | ✅ |
 | Per-artifact-path ACLs | ❌ | ✅ |
-| Short-lived token issuance | ❌ | ✅ |
+| Operator-issued tokens | ❌ | ❌ (not needed) |
 | LDAP delegation | ❌ | 🔜 Phase 7 |
 
 ---
@@ -415,17 +621,28 @@ as the Maven/Gradle password — no long-lived password Secrets needed.
 - [ ] README: metrics section updated
 
 ### Authentication
-- [ ] Extend CRD schema with `auth.users[].role`, `auth.oidc`, `auth.acls`
-- [ ] `RoleBasedHtpasswdService`: filter users by role when building htpasswd files
-- [ ] `OidcAuthSidecar`: new ASP.NET Core project `MavenOperator.AuthProxy`
-- [ ] Operator injects `maven-auth-proxy` sidecar when `auth.oidc.enabled: true`
-- [ ] NGINX `auth_request` template block rendered by `NginxConfigRenderer`
+- [ ] Extend CRD schema with `auth.users[].role` (backward-compatible with legacy `secretRefs`)
+- [ ] Extend CRD schema with `auth.ciTrust[]` (platform, issuerUrl, audience, role, claims)
+- [ ] CEL validation: `ciTrust[].claims` must be non-empty; `platform` and `role` must be valid enums
+- [ ] `RoleBasedHtpasswdService`: filter users by role when building download/upload htpasswd files
+- [ ] New project `MavenOperator.AuthProxy` — ASP.NET Core sidecar handling both Basic Auth and Bearer JWT
+- [ ] `IJwksCache` service: fetch and cache JWKS per issuer URL; force-refresh on unknown `kid`
+- [ ] `ITrustEvaluator` service: evaluate `ciTrust` bindings against JWT claims (glob matching, ordered, first-match)
+- [ ] `IAuthProxyConfig` / `IOptionsMonitor<T>`: hot-reload from ConfigMap without sidecar restart
+- [ ] Operator renders `maven-auth-proxy` ConfigMap from `ciTrust` spec and injects sidecar into NGINX pods
+- [ ] NGINX `auth_request` template block rendered by `NginxConfigRenderer` (replacing direct `auth_basic` when `ciTrust` is non-empty)
 - [ ] ACL location block rendering (ordered by specificity)
-- [ ] Token issuance endpoint (operator HTTP API or aggregated API)
-- [ ] Unit tests: role filtering, ACL ordering, JWT validation, token issuance
-- [ ] Integration tests: OIDC flow with a local Dex instance in k3d
-- [ ] E2E tests: verify 403 on wrong role, 401 on missing token, ACL enforcement
-- [ ] Backward-compatibility: existing `auth.download.secretRefs` still works
+- [ ] Unit tests: `TrustEvaluator` — glob matching, first-match, audience enforcement, empty-claims rejection
+- [ ] Unit tests: `JwksCache` — cache hit, cache miss, force-refresh on unknown kid, HTTPS-only issuer
+- [ ] Unit tests: role filtering in `RoleBasedHtpasswdService`
+- [ ] Unit tests: ACL `location` block ordering
+- [ ] Integration tests: validate GitHub Actions JWT (use a pre-signed test JWT from the GH OIDC JWKS) → 200 deployer
+- [ ] Integration tests: validate GitLab JWT (use a pre-signed test JWT) → correct role
+- [ ] Integration tests: mismatched claim → 403
+- [ ] Integration tests: expired JWT → 401
+- [ ] Integration tests: unknown issuer → 403
+- [ ] E2E tests: synthetic GitHub-format JWT → `mvn deploy` succeeds; wrong repo claim → 403
+- [ ] Backward-compatibility: existing `auth.download.secretRefs` still works unmodified
 
 ---
 
