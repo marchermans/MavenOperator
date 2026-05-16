@@ -117,6 +117,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Also export a local tarball so downstream jobs can load it without
+          # needing GHCR access or a rebuild.
+          outputs: type=docker,dest=/tmp/maven-operator.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -129,8 +132,30 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-proxy.outputs.tags }}
           labels: ${{ steps.meta-proxy.outputs.labels }}
+          outputs: type=docker,dest=/tmp/maven-virtual-proxy.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Re-tag tarballs with the stable local name used by test scripts.
+      - name: Re-tag images with stable local names
+        run: |
+          docker load -i /tmp/maven-operator.tar
+          docker tag $(docker images -q | head -1) maven-operator:ci
+          docker save maven-operator:ci -o /tmp/maven-operator.tar
+
+          docker load -i /tmp/maven-virtual-proxy.tar
+          docker tag $(docker images -q | head -1) maven-virtual-proxy:ci
+          docker save maven-virtual-proxy:ci -o /tmp/maven-virtual-proxy.tar
+
+      - name: Upload operator image tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: |
+            /tmp/maven-operator.tar
+            /tmp/maven-virtual-proxy.tar
+          # Images are only needed by jobs in the same run; 1-day retention is enough.
+          retention-days: 1
 
   # ── Helm chart ──────────────────────────────────────────────────────────────
   helm:
@@ -181,6 +206,9 @@ jobs:
           name: helm-chart
           path: /tmp/helm-packages/*.tgz
 
+  # ── Shared step: load pre-built images ─────────────────────────────────────
+  # (inline in each job below via download-artifact + docker load)
+
   # ── Integration tests (on push to main only, requires k3d) ─────────────────
   integration:
     name: Integration Tests
@@ -206,10 +234,16 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Build operator image (local)
+      - name: Download pre-built Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Load Docker images
         run: |
-          docker build -t maven-operator:ci -f MavenOperator/Dockerfile .
-          docker build -t maven-virtual-proxy:ci -f MavenOperator.VirtualProxy/Dockerfile .
+          docker load -i /tmp/maven-operator.tar
+          docker load -i /tmp/maven-virtual-proxy.tar
 
       - name: Build .NET projects
         run: dotnet build --configuration Release
@@ -220,4 +254,140 @@ jobs:
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
         run: |
           ./scripts/run-tests.sh integration --no-build --cleanup
+
+  # ── E2E tests (on push to main only, requires k3d + Maven/Gradle) ──────────
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Java (Maven/Gradle toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Maven
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends maven
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Download pre-built Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Load Docker images
+        run: |
+          docker load -i /tmp/maven-operator.tar
+          docker load -i /tmp/maven-virtual-proxy.tar
+
+      - name: Build .NET projects
+        run: dotnet build --configuration Release
+
+      - name: Run E2E tests
+        env:
+          OPERATOR_IMAGE: maven-operator:ci
+          VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+        run: |
+          ./scripts/run-tests.sh e2e --no-build --cleanup
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: "**/*.trx"
+
+  # ── Performance tests (on push to main only) ────────────────────────────────
+  performance:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq
+          sudo apt-get install -y k6
+          k6 version
+
+      - name: Download pre-built Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Load Docker images
+        run: |
+          docker load -i /tmp/maven-operator.tar
+          docker load -i /tmp/maven-virtual-proxy.tar
+
+      - name: Build .NET projects
+        run: dotnet build --configuration Release
+
+      - name: Run performance tests (smoke + benchmark + load)
+        env:
+          OPERATOR_IMAGE: maven-operator:ci
+          VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+        run: |
+          ./scripts/run-tests.sh performance --perf-mode all --no-build --cleanup
+
+      - name: Upload performance test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-test-results
+          path: |
+            **/*.trx
+            **/BenchmarkDotNet.Artifacts/**
+            MavenOperator.Tests.Performance/k6/**/*.json
 
