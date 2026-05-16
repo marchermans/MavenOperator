@@ -195,7 +195,8 @@ public sealed class VirtualProxyServiceTests : IDisposable
             mergeService,
             httpClient,
             NullLogger<VirtualProxyService>.Instance,
-            _cache);
+            _cache,
+            new VirtualProxyMetrics());
     }
 
     private static HttpResponseMessage OkBytes(byte[] data) =>

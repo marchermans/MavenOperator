@@ -1,0 +1,16 @@
+apiVersion: v2
+name: maven-operator
+description: A Kubernetes Operator that manages self-hosted Maven repositories via CRDs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - maven
+  - artifact-repository
+  - kubernetes-operator
+  - nginx
+sources:
+  - https://github.com/marchermans/MavenOperator
+maintainers:
+  - name: marchermans
+

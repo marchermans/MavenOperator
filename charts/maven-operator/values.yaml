@@ -1,0 +1,77 @@
+# Default values for maven-operator.
+# Override these in your own values.yaml or with --set flags.
+
+# -- Number of operator replicas (leader-election ensures only 1 is active)
+replicaCount: 1
+
+image:
+  # -- Operator image repository (without tag)
+  repository: ghcr.io/marchermans/maven-operator
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag; defaults to Chart.appVersion
+  tag: ""
+
+virtualProxy:
+  image:
+    # -- Virtual-proxy image repository (without tag)
+    repository: ghcr.io/marchermans/maven-virtual-proxy
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag; defaults to Chart.appVersion
+    tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  name: ""
+
+# -- Annotations applied to the operator Pod
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+metrics:
+  # -- Enable the Prometheus ServiceMonitor (requires prometheus-operator CRDs)
+  serviceMonitor:
+    enabled: false
+    # -- Namespace to create the ServiceMonitor in (defaults to release namespace)
+    namespace: ""
+    # -- Additional labels for the ServiceMonitor (e.g. to match a Prometheus instance)
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+
+# -- RBAC ClusterRole/ClusterRoleBinding for the operator
+rbac:
+  create: true
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+

@@ -4,6 +4,7 @@ using MavenOperator.Entities;
 using MavenOperator.Reconcilers;
 using MavenOperator.Services;
 using k8s.Models;
+using Prometheus;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -25,6 +26,11 @@ builder.Services.AddSingleton<IKubernetesResourceManager, KubernetesResourceMana
 
 // ── Phase 4 services ─────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IKubernetesEventService, KubernetesEventService>();
+
+// ── Phase 5 — Prometheus metrics ──────────────────────────────────────────────
+builder.Services.AddSingleton<IOperatorMetrics, OperatorMetrics>();
+// KubeOps uses a .NET Generic Host; expose /metrics via a standalone HTTP server on port 9090
+builder.Services.AddMetricServer(options => options.Port = 9090);
 
 // ── Type-specific reconcilers ─────────────────────────────────────────────────
 builder.Services.AddSingleton<IHostedRepositoryReconciler, HostedRepositoryReconciler>();

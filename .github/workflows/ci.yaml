@@ -1,0 +1,223 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: ghcr.io
+  OPERATOR_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-operator
+  PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-virtual-proxy
+  CHART_NAME: maven-operator
+
+jobs:
+  # ── Build & Unit tests ──────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Unit Tests (MavenOperator.Tests.Unit)
+        run: >
+          dotnet test MavenOperator.Tests.Unit/MavenOperator.Tests.Unit.csproj
+          --no-build --configuration Release
+          --logger "trx;LogFileName=unit-results.trx"
+          --collect "XPlat Code Coverage"
+
+      - name: Unit Tests (MavenOperator.Tests.Unit.VirtualProxy)
+        run: >
+          dotnet test MavenOperator.Tests.Unit.VirtualProxy/MavenOperator.Tests.Unit.VirtualProxy.csproj
+          --no-build --configuration Release
+          --logger "trx;LogFileName=unit-vp-results.trx"
+          --collect "XPlat Code Coverage"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/*.trx"
+
+  # ── Docker images ───────────────────────────────────────────────────────────
+  docker:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      operator_digest: ${{ steps.push-operator.outputs.digest }}
+      proxy_digest: ${{ steps.push-proxy.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata (operator)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.OPERATOR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Compute image metadata (virtual proxy)
+        id: meta-proxy
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PROXY_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build & push operator image
+        id: push-operator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push virtual-proxy image
+        id: push-proxy
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.VirtualProxy/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-proxy.outputs.tags }}
+          labels: ${{ steps.meta-proxy.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Helm chart ──────────────────────────────────────────────────────────────
+  helm:
+    name: Lint, Package & Push Helm Chart
+    runs-on: ubuntu-latest
+    needs: docker
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.17.x"
+
+      - name: Lint Helm chart
+        run: helm lint charts/maven-operator
+
+      - name: Update appVersion in Chart.yaml from image tag
+        if: github.event_name != 'pull_request'
+        run: |
+          TAG="${{ needs.docker.outputs.image_tag }}"
+          if [[ -n "$TAG" ]]; then
+            sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" charts/maven-operator/Chart.yaml
+          fi
+
+      - name: Package Helm chart
+        run: helm package charts/maven-operator --destination /tmp/helm-packages
+
+      - name: Log in to GHCR (Helm OCI)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} \
+            --password-stdin
+
+      - name: Push Helm chart to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          helm push /tmp/helm-packages/*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Upload Helm package as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: /tmp/helm-packages/*.tgz
+
+  # ── Integration tests (on push to main only, requires k3d) ─────────────────
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Build operator image (local)
+        run: |
+          docker build -t maven-operator:ci -f MavenOperator/Dockerfile .
+          docker build -t maven-virtual-proxy:ci -f MavenOperator.VirtualProxy/Dockerfile .
+
+      - name: Build .NET projects
+        run: dotnet build --configuration Release
+
+      - name: Run integration tests
+        env:
+          OPERATOR_IMAGE: maven-operator:ci
+          VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+        run: |
+          ./scripts/run-tests.sh integration --no-build --cleanup
+

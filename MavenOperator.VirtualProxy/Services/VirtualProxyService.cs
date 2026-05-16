@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
@@ -44,7 +45,8 @@ public sealed class VirtualProxyService(
     IMetadataMergeService metadataMerge,
     HttpClient httpClient,
     ILogger<VirtualProxyService> logger,
-    IMemoryCache cache)
+    IMemoryCache cache,
+    IVirtualProxyMetrics metrics)
     : IVirtualProxyService
 {
     /// <inheritdoc/>
@@ -66,8 +68,12 @@ public sealed class VirtualProxyService(
             return ToStreamResult(cached, "application/xml");
         }
 
+        var sw = Stopwatch.StartNew();
         var memberUrls = config.Members.Select(m => m.BaseUrl).ToList();
         var merged = await metadataMerge.MergeMetadataAsync(memberUrls, artifactPath, ct);
+        sw.Stop();
+
+        metrics.RecordMetadataMerge(config.Name, memberUrls.Count, sw.Elapsed.TotalSeconds);
 
         if (merged is null)
             return null;
@@ -82,19 +88,27 @@ public sealed class VirtualProxyService(
         foreach (var member in config.Members)
         {
             var url = member.BaseUrl.TrimEnd('/') + "/" + artifactPath.TrimStart('/');
+            var sw = Stopwatch.StartNew();
             try
             {
                 var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                sw.Stop();
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    metrics.RecordMemberRequest(config.Name, member.Name, false, sw.Elapsed.TotalSeconds);
                     continue;
+                }
 
                 if (!response.IsSuccessStatusCode)
                 {
+                    metrics.RecordMemberRequest(config.Name, member.Name, false, sw.Elapsed.TotalSeconds);
                     logger.LogWarning("[Virtual] Member {Name} returned {Status} for {Path}",
                         member.Name, response.StatusCode, artifactPath);
                     continue;
                 }
+
+                metrics.RecordMemberRequest(config.Name, member.Name, true, sw.Elapsed.TotalSeconds);
 
                 var stream      = await response.Content.ReadAsStreamAsync(ct);
                 var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
@@ -104,6 +118,8 @@ public sealed class VirtualProxyService(
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                sw.Stop();
+                metrics.RecordMemberRequest(config.Name, member.Name, false, sw.Elapsed.TotalSeconds);
                 logger.LogWarning(ex, "[Virtual] Member {Name} failed for {Path}", member.Name, artifactPath);
             }
         }
