@@ -14,10 +14,50 @@ env:
   CHART_NAME: maven-operator
 
 jobs:
+  # ── Compute the canonical semver for this run ───────────────────────────────
+  # Rule:
+  #   git tag  v1.2.3          →  version = "1.2.3"             (release)
+  #   push to main             →  version = "<base>-main.<sha7>" (snapshot)
+  #   push to other branch     →  version = "<base>-<branch>.<sha7>"
+  #
+  # <base> is read from the VERSION file at the repo root.
+  # The "+" build-metadata separator is avoided because Helm OCI does not allow it.
+  version:
+    name: Compute Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      is_release: ${{ steps.compute.outputs.is_release }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version string
+        id: compute
+        run: |
+          BASE="$(cat VERSION | tr -d '[:space:]')"
+          SHA7="${GITHUB_SHA::7}"
+          REF="${GITHUB_REF}"
+
+          if [[ "$REF" == refs/tags/v* ]]; then
+            VERSION="${REF#refs/tags/v}"
+            IS_RELEASE="true"
+          else
+            BRANCH="${GITHUB_REF_NAME}"
+            BRANCH_SAFE="$(echo "$BRANCH" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
+            VERSION="${BASE}-${BRANCH_SAFE}.${SHA7}"
+            IS_RELEASE="false"
+          fi
+
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VERSION}  (is_release=${IS_RELEASE})"
+
   # ── Build & Unit tests ──────────────────────────────────────────────────────
   build-and-test:
     name: Build & Unit Tests
     runs-on: ubuntu-latest
+    needs: version
     permissions:
       contents: read
 
@@ -56,18 +96,13 @@ jobs:
           name: test-results
           path: "**/*.trx"
 
-  # ── Docker build (produces tarballs for downstream test jobs) ───────────────
-  # Images are NOT pushed here — pushing happens in the release job only after
-  # all tests pass.
+  # ── Docker build (tarballs for test jobs; NOT pushed to registry yet) ────────
   docker-build:
     name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: [version, build-and-test]
     permissions:
       contents: read
-
-    outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -75,38 +110,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Compute image metadata (operator)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.OPERATOR_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-
-      - name: Compute image metadata (virtual proxy)
-        id: meta-proxy
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.PROXY_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-
       - name: Build operator image (export tarball only)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator/Dockerfile
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: maven-operator:ci
           outputs: type=docker,dest=/tmp/maven-operator.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -117,22 +127,10 @@ jobs:
           context: .
           file: MavenOperator.VirtualProxy/Dockerfile
           push: false
-          tags: ${{ steps.meta-proxy.outputs.tags }}
-          labels: ${{ steps.meta-proxy.outputs.labels }}
+          tags: maven-virtual-proxy:ci
           outputs: type=docker,dest=/tmp/maven-virtual-proxy.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # Re-tag with stable local names used by run-tests.sh
-      - name: Re-tag images with stable local names
-        run: |
-          docker load -i /tmp/maven-operator.tar
-          docker tag $(docker images -q | head -1) maven-operator:ci
-          docker save maven-operator:ci -o /tmp/maven-operator.tar
-
-          docker load -i /tmp/maven-virtual-proxy.tar
-          docker tag $(docker images -q | head -1) maven-virtual-proxy:ci
-          docker save maven-virtual-proxy:ci -o /tmp/maven-virtual-proxy.tar
 
       - name: Upload image tarballs
         uses: actions/upload-artifact@v4
@@ -143,7 +141,7 @@ jobs:
             /tmp/maven-virtual-proxy.tar
           retention-days: 1
 
-  # ── Integration tests (on push to main only, requires k3d) ─────────────────
+  # ── Integration tests ───────────────────────────────────────────────────────
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -186,8 +184,7 @@ jobs:
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
-        run: |
-          ./scripts/run-tests.sh integration --cleanup
+        run: ./scripts/run-tests.sh integration --cleanup
 
       - name: Upload integration test results
         if: always()
@@ -196,7 +193,7 @@ jobs:
           name: integration-test-results
           path: "**/*.trx"
 
-  # ── E2E tests (on push to main only, requires k3d + Maven/Gradle) ──────────
+  # ── E2E tests ───────────────────────────────────────────────────────────────
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -235,7 +232,6 @@ jobs:
       - name: Install k3d
         run: |
           curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-          k3d version
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -255,8 +251,7 @@ jobs:
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
-        run: |
-          ./scripts/run-tests.sh e2e --cleanup
+        run: ./scripts/run-tests.sh e2e --cleanup
 
       - name: Upload E2E test results
         if: always()
@@ -265,9 +260,7 @@ jobs:
           name: e2e-test-results
           path: "**/*.trx"
 
-  # ── Performance tests (smoke + benchmarks; k6 load tests run locally only) ──
-  # k6 load tests require dedicated infrastructure and are not run in CI.
-  # Use --perf-mode load manually against a real cluster for load testing.
+  # ── Performance tests (smoke + BenchmarkDotNet; k6 load is local-only) ──────
   performance:
     name: Performance Tests
     runs-on: ubuntu-latest
@@ -302,15 +295,13 @@ jobs:
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
-        run: |
-          ./scripts/run-tests.sh performance --perf-mode smoke
+        run: ./scripts/run-tests.sh performance --perf-mode smoke
 
       - name: Run BenchmarkDotNet micro-benchmarks
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
-        run: |
-          ./scripts/run-tests.sh performance --perf-mode benchmark
+        run: ./scripts/run-tests.sh performance --perf-mode benchmark
 
       - name: Upload performance test results
         if: always()
@@ -325,10 +316,8 @@ jobs:
   release:
     name: Push Images & Publish Helm Chart
     runs-on: ubuntu-latest
-    # Only run on push to main or a version tag — never on PRs.
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    # Gate on every test job. If any of them is skipped (PR), this is also skipped.
-    needs: [build-and-test, docker-build, integration, e2e, performance]
+    needs: [version, build-and-test, docker-build, integration, e2e, performance]
     permissions:
       contents: read
       packages: write
@@ -346,52 +335,50 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image metadata (operator)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.OPERATOR_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
+      # Build the full set of Docker tags from the canonical version.
+      # Release (v1.2.3 tag):  1.2.3, 1.2, latest
+      # Snapshot (branch push): 0.1.0-main.abc1234, main
+      - name: Compute image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          IS_RELEASE: ${{ needs.version.outputs.is_release }}
+        run: |
+          BASE_OP="${OPERATOR_IMAGE}:${VERSION}"
+          BASE_PX="${PROXY_IMAGE}:${VERSION}"
 
-      - name: Compute image metadata (virtual proxy)
-        id: meta-proxy
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.PROXY_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
+          if [[ "$IS_RELEASE" == "true" ]]; then
+            MAJOR_MINOR="${VERSION%.*}"
+            OP_TAGS="${BASE_OP},${OPERATOR_IMAGE}:${MAJOR_MINOR},${OPERATOR_IMAGE}:latest"
+            PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${MAJOR_MINOR},${PROXY_IMAGE}:latest"
+          else
+            BRANCH_SAFE="$(echo "${GITHUB_REF_NAME}" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
+            OP_TAGS="${BASE_OP},${OPERATOR_IMAGE}:${BRANCH_SAFE}"
+            PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${BRANCH_SAFE}"
+          fi
 
-      # Re-use the GHA layer cache — images were already cached by docker-build.
+          echo "operator_tags=${OP_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "proxy_tags=${PX_TAGS}"    >> "$GITHUB_OUTPUT"
+          echo "Operator tags: ${OP_TAGS}"
+          echo "Proxy tags:    ${PX_TAGS}"
+
       - name: Push operator image to GHCR
-        id: push-operator
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.operator_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Push virtual-proxy image to GHCR
-        id: push-proxy
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator.VirtualProxy/Dockerfile
           push: true
-          tags: ${{ steps.meta-proxy.outputs.tags }}
-          labels: ${{ steps.meta-proxy.outputs.labels }}
+          tags: ${{ steps.tags.outputs.proxy_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -400,15 +387,18 @@ jobs:
         with:
           version: "3.17.3"
 
+      - name: Stamp version into Chart.yaml
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          sed -i "s/^version:.*/version: \"${VERSION}\"/"       charts/maven-operator/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/maven-operator/Chart.yaml
+          echo "Stamped Chart.yaml:"
+          cat charts/maven-operator/Chart.yaml
+
       - name: Lint Helm chart
         run: helm lint charts/maven-operator
 
-      - name: Update appVersion in Chart.yaml from image tag
-        run: |
-          TAG="${{ steps.meta.outputs.version }}"
-          if [[ -n "$TAG" ]]; then
-            sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" charts/maven-operator/Chart.yaml
-          fi
 
       - name: Package Helm chart
         run: helm package charts/maven-operator --destination /tmp/helm-packages
@@ -428,3 +418,4 @@ jobs:
         with:
           name: helm-chart
           path: /tmp/helm-packages/*.tgz
+

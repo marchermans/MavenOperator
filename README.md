@@ -1,0 +1,531 @@
+# MavenOperator
+
+A **Kubernetes Operator** written in C# (.NET 10) that manages self-hosted Maven
+repositories as first-class Kubernetes resources.  
+Declare a `MavenRepository` custom resource and the operator automatically
+provisions NGINX-based storage pods, proxy-cache pods, or a virtual fan-out
+aggregation proxy — complete with authentication, Ingress, PersistentVolumes, and
+Prometheus metrics.
+
+---
+
+## Table of Contents
+
+- [Concepts](#concepts)
+- [Repository Types](#repository-types)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [Quick start (Helm)](#quick-start-helm)
+  - [Helm values reference](#helm-values-reference)
+- [Usage](#usage)
+  - [Hosted repository](#hosted-repository)
+  - [Proxy repository](#proxy-repository)
+  - [Virtual repository](#virtual-repository)
+  - [Authentication](#authentication)
+  - [Exposing via Ingress](#exposing-via-ingress)
+  - [Using with Maven](#using-with-maven)
+  - [Using with Gradle](#using-with-gradle)
+- [Status & conditions](#status--conditions)
+- [Metrics](#metrics)
+- [Development](#development)
+  - [Repository layout](#repository-layout)
+  - [Building locally](#building-locally)
+  - [Running the test suite](#running-the-test-suite)
+  - [Releasing a new version](#releasing-a-new-version)
+- [Architecture overview](#architecture-overview)
+- [Roadmap](#roadmap)
+
+---
+
+## Concepts
+
+| Term | Meaning |
+|------|---------|
+| **MavenRepository** | The single CRD that describes the desired state of a repo. |
+| **Operator** | The controller loop (`MavenOperator`) that watches CRs and reconciles child resources. |
+| **Virtual Proxy** | A separate ASP.NET Core sidecar (`MavenOperator.VirtualProxy`) that fans requests out to repo members and merges `maven-metadata.xml`. |
+
+The CRD is the *single source of truth*. Every aspect of a repository's desired
+state — type, storage, auth, upstream URL, members — lives in the spec.
+
+---
+
+## Repository Types
+
+### Hosted
+Stores artifacts on a PersistentVolume served by NGINX + WebDAV.  
+Use this for internal snapshots and releases.
+
+### Proxy
+Caches artifacts from a remote upstream (e.g. Maven Central) via NGINX
+`proxy_pass`. Downloads are transparently forwarded and cached locally.
+
+### Virtual
+Aggregates multiple Hosted and/or Proxy repositories.  
+- Requests are fanned out to all members in parallel.  
+- `maven-metadata.xml` responses are **merged** across all members, so
+  your build tool always sees the union of available versions.  
+- Uploads are forbidden (`405 Method Not Allowed`) — upload directly to a Hosted member.
+
+---
+
+## Prerequisites
+
+| Requirement | Version |
+|-------------|---------|
+| Kubernetes | ≥ 1.28 |
+| Helm | ≥ 3.14 |
+| `kubectl` | matching your cluster version |
+| Persistent storage provisioner | any (e.g. `local-path`, `longhorn`, cloud CSI) |
+
+Optional but recommended:
+- **Ingress controller** (e.g. NGINX Ingress, Traefik) — for external access.
+- **cert-manager** — for automatic TLS on Ingress resources.
+- **prometheus-operator** — for `ServiceMonitor`-based scraping.
+
+---
+
+## Installation
+
+### Quick start (Helm)
+
+```bash
+# 1. Add the GHCR OCI registry (one-time)
+helm registry login ghcr.io --username <your-github-username> \
+  --password <your-github-pat-with-read:packages>
+
+# 2. Install the operator into its own namespace
+helm upgrade --install maven-operator \
+  oci://ghcr.io/marchermans/charts/maven-operator \
+  --namespace maven-operator-system \
+  --create-namespace \
+  --version 0.1.0
+```
+
+The chart installs:
+- The operator `Deployment`
+- A `ServiceAccount` + `ClusterRole` / `ClusterRoleBinding`
+- A `Service` on port 9090 for Prometheus scraping
+
+> **CRD lifecycle**: CRDs are bundled in `charts/maven-operator/crds/` and
+> installed automatically by Helm on the first install.  Helm does **not**
+> delete CRDs on `helm uninstall` — your `MavenRepository` objects persist.
+
+---
+
+### Helm values reference
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `replicaCount` | `1` | Operator replicas (leader election keeps only 1 active). |
+| `image.repository` | `ghcr.io/marchermans/maven-operator` | Operator image. |
+| `image.tag` | `""` → `Chart.appVersion` | Pin to a specific digest/tag. |
+| `virtualProxy.image.repository` | `ghcr.io/marchermans/maven-virtual-proxy` | Virtual proxy image. |
+| `virtualProxy.image.tag` | `""` → `Chart.appVersion` | Pin to a specific digest/tag. |
+| `resources.limits.cpu` | `500m` | |
+| `resources.limits.memory` | `256Mi` | |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus `ServiceMonitor`. |
+| `metrics.serviceMonitor.additionalLabels` | `{}` | Labels to match your Prometheus instance. |
+| `rbac.create` | `true` | Create ClusterRole and binding. |
+
+Full list: [`charts/maven-operator/values.yaml`](charts/maven-operator/values.yaml)
+
+---
+
+## Usage
+
+All examples below create resources in a `my-repos` namespace:
+
+```bash
+kubectl create namespace my-repos
+```
+
+---
+
+### Hosted repository
+
+```yaml
+apiVersion: maven.operator.io/v1alpha1
+kind: MavenRepository
+metadata:
+  name: releases
+  namespace: my-repos
+spec:
+  type: Hosted
+  storage:
+    size: 20Gi
+    storageClassName: standard   # omit to use the cluster default
+    deletionPolicy: Retain       # Retain (default) | Delete
+  auth:
+    download:
+      policy: Anonymous          # Anonymous | Authenticated
+    upload:
+      policy: Authenticated
+      secretRefs:
+        - name: deploy-credentials
+```
+
+The operator creates:
+- A PVC `releases-data` (20 Gi)
+- An NGINX deployment `releases-nginx`
+- A Service `releases-svc` on port 80
+
+Artifacts are stored at the path `/repository/releases/<groupId>/<artifactId>/…`.
+
+---
+
+### Proxy repository
+
+```yaml
+apiVersion: maven.operator.io/v1alpha1
+kind: MavenRepository
+metadata:
+  name: maven-central-cache
+  namespace: my-repos
+spec:
+  type: Proxy
+  upstream:
+    url: https://repo1.maven.org/maven2
+  cache:
+    size: 50Gi
+  auth:
+    download:
+      policy: Anonymous
+    upload:
+      policy: Authenticated   # upload == refresh cache on-demand (optional)
+      secretRefs:
+        - name: admin-credentials
+```
+
+---
+
+### Virtual repository
+
+```yaml
+apiVersion: maven.operator.io/v1alpha1
+kind: MavenRepository
+metadata:
+  name: public
+  namespace: my-repos
+spec:
+  type: Virtual
+  virtual:
+    members:
+      - name: releases
+        namespace: my-repos
+      - name: maven-central-cache
+        namespace: my-repos
+  auth:
+    download:
+      policy: Anonymous
+```
+
+Point your build tools at `public` and they transparently resolve artifacts from
+both `releases` and `maven-central-cache`.
+
+---
+
+### Authentication
+
+Each `secretRef` points to a Kubernetes `Secret` with exactly two keys:
+
+```bash
+kubectl create secret generic deploy-credentials \
+  --namespace my-repos \
+  --from-literal=username=ci-deploy \
+  --from-literal=password='s3cr3t!'
+```
+
+The operator compiles all referenced Secrets into a single htpasswd file and
+keeps it updated whenever a credential Secret changes.
+
+Download and upload policies are **independent** and produce separate htpasswd
+Secrets:
+- `<name>-download-htpasswd`
+- `<name>-upload-htpasswd`
+
+---
+
+### Exposing via Ingress
+
+Add an `ingress` block to the spec:
+
+```yaml
+spec:
+  # ... (type, storage, auth as above)
+  ingress:
+    enabled: true
+    className: nginx
+    host: maven.example.com
+    tls:
+      enabled: true
+      secretName: maven-tls   # pre-created by cert-manager or manually
+```
+
+The operator creates an `Ingress` resource with appropriate annotations for
+WebDAV (PUT/DELETE) pass-through on Hosted repos.
+
+---
+
+### Using with Maven
+
+Add the repository to your `~/.m2/settings.xml`:
+
+```xml
+<settings>
+  <servers>
+    <server>
+      <id>my-releases</id>
+      <username>ci-deploy</username>
+      <password>s3cr3t!</password>
+    </server>
+  </servers>
+</settings>
+```
+
+In your `pom.xml`:
+
+```xml
+<distributionManagement>
+  <repository>
+    <id>my-releases</id>
+    <url>http://releases-svc.my-repos.svc.cluster.local/repository/releases</url>
+  </repository>
+</distributionManagement>
+
+<repositories>
+  <repository>
+    <id>public</id>
+    <url>http://public-svc.my-repos.svc.cluster.local/repository/public</url>
+  </repository>
+</repositories>
+```
+
+---
+
+### Using with Gradle
+
+```groovy
+// build.gradle (Groovy DSL)
+repositories {
+    maven {
+        url "http://public-svc.my-repos.svc.cluster.local/repository/public"
+    }
+}
+
+publishing {
+    repositories {
+        maven {
+            url "http://releases-svc.my-repos.svc.cluster.local/repository/releases"
+            credentials {
+                username = findProperty("mavenUser") ?: "ci-deploy"
+                password = findProperty("mavenPass") ?: ""
+            }
+        }
+    }
+}
+```
+
+---
+
+## Status & conditions
+
+The operator writes reconciliation state back into `status`:
+
+```bash
+kubectl get mavenrepository releases -n my-repos -o yaml
+```
+
+```yaml
+status:
+  phase: Ready          # Pending | Provisioning | Ready | Failed | Terminating
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: ReconcileSuccess
+      lastTransitionTime: "2026-05-16T10:00:00Z"
+```
+
+Errors are also emitted as Kubernetes Events:
+
+```bash
+kubectl events --namespace my-repos --for mavenrepository/releases
+```
+
+---
+
+## Metrics
+
+Both the operator and the virtual proxy expose Prometheus metrics.
+
+| Component | Endpoint | Port |
+|-----------|----------|------|
+| Operator | `/metrics` | `9090` |
+| Virtual Proxy | `/metrics` | `8080` |
+
+### Operator metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `mavenoperator_reconcile_duration_seconds` | Histogram | `repo_name`, `repo_type`, `success` | Reconcile loop latency |
+| `mavenoperator_reconcile_total` | Counter | `repo_name`, `repo_type`, `success` | Total reconcile invocations |
+| `mavenoperator_resource_apply_total` | Counter | `repo_name`, `repo_type`, `resource_kind` | Child resources applied |
+| `mavenoperator_repository_count` | Gauge | `repo_type`, `phase` | Number of repositories per type/phase |
+
+### Virtual proxy metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `virtual_proxy_requests_total` | Counter | `repo_name`, `asset_path`, `asset_type`, `status_code` | Per-asset download counter |
+| `virtual_proxy_member_request_duration_seconds` | Histogram | `repo_name`, `member_name`, `success` | Per-member fetch latency |
+| `virtual_proxy_metadata_merge_duration_seconds` | Histogram | `repo_name` | `maven-metadata.xml` merge latency |
+| `virtual_proxy_metadata_merge_member_count` | Histogram | `repo_name` | Members queried per merge |
+
+`asset_type` is one of: `jar`, `pom`, `metadata`, `checksum`, `other`.
+
+### Enabling ServiceMonitor (prometheus-operator)
+
+```bash
+helm upgrade maven-operator oci://ghcr.io/marchermans/charts/maven-operator \
+  --reuse-values \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack
+```
+
+---
+
+## Development
+
+### Repository layout
+
+```
+MavenOperator/
+├── VERSION                          # Base semver (bump before tagging a release)
+├── config/crds/                     # Generated CRD YAML (committed)
+├── charts/maven-operator/           # Helm chart
+├── MavenOperator/                   # Operator (KubeOps, .NET 10)
+│   ├── Controllers/                 # KubeOps reconciliation entry points
+│   ├── Entities/                    # CRD entity + Spec/Status POCOs
+│   ├── Reconcilers/                 # One reconciler per repo type
+│   ├── Services/                    # NginxConfigRenderer, HtpasswdService, …
+│   └── Templates/                   # Scriban NGINX config templates
+├── MavenOperator.VirtualProxy/      # Virtual-repo aggregation proxy
+├── MavenOperator.Tests.Unit/        # Pure unit tests (no cluster)
+├── MavenOperator.Tests.Unit.VirtualProxy/
+├── MavenOperator.Tests.Integration/ # Reconciler tests against k3d
+├── MavenOperator.Tests.E2E/         # End-to-end Maven/Gradle round-trips
+├── MavenOperator.Tests.Performance/ # BenchmarkDotNet + k6 load tests
+└── scripts/
+    └── run-tests.sh                 # Developer test driver
+```
+
+### Building locally
+
+```bash
+# Restore & build everything
+dotnet restore
+dotnet build
+
+# Build Docker images
+docker build -t maven-operator:dev       -f MavenOperator/Dockerfile .
+docker build -t maven-virtual-proxy:dev  -f MavenOperator.VirtualProxy/Dockerfile .
+```
+
+### Running the test suite
+
+The `scripts/run-tests.sh` script is the single entry point for all test suites.
+It manages a local k3d cluster automatically.
+
+```bash
+# Unit tests only (no cluster needed) — fastest feedback loop
+./scripts/run-tests.sh unit
+
+# Unit + integration
+./scripts/run-tests.sh unit integration
+
+# Everything except k6 load tests (quick CI-equivalent)
+./scripts/run-tests.sh all --fast
+
+# Full suite including k6 load tests, then tear everything down
+./scripts/run-tests.sh all --cleanup
+
+# E2E against a pre-existing cluster (skip cluster creation)
+KUBECONFIG=~/.kube/my-cluster.yaml ./scripts/run-tests.sh e2e
+
+# k6 load tests only (requires a running cluster with the operator deployed)
+./scripts/run-tests.sh performance --perf-mode load
+```
+
+#### Prerequisites for cluster-based suites
+
+| Tool | Install |
+|------|---------|
+| k3d ≥ 5 | `curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh \| bash` |
+| kubectl | `https://kubernetes.io/docs/tasks/tools/` |
+| Docker | — |
+| Maven (E2E) | `sudo apt install maven` / `brew install maven` |
+| Gradle (E2E) | via Gradle wrapper in fixtures |
+| k6 (load) | `https://grafana.com/docs/k6/latest/set-up/install-k6/` |
+
+### Releasing a new version
+
+1. Bump the version number in `VERSION` (e.g. `0.1.0` → `0.2.0`).
+2. Commit: `git commit -am "chore: bump version to 0.2.0"`.
+3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+CI will automatically:
+- Run all tests.
+- Build and push both Docker images tagged `0.2.0`, `0.2`, and `latest`.
+- Stamp `version: "0.2.0"` and `appVersion: "0.2.0"` into `Chart.yaml`.
+- Package and push the Helm chart to `oci://ghcr.io/marchermans/charts`.
+
+Snapshot builds on `main` are tagged `<base>-main.<sha7>` (e.g.
+`0.2.0-main.abc1234`) and the Helm chart receives the same version string.
+
+---
+
+## Architecture overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Kubernetes API                                          │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ MavenRepository CRD  (source of truth)          │    │
+│  └─────────────────────────────────────────────────┘    │
+│              ▲ watch / patch status                      │
+│              │                                           │
+│  ┌───────────┴──────────────────────────────────────┐   │
+│  │ MavenOperator (KubeOps controller loop)          │   │
+│  │  HostedRepositoryReconciler                      │   │
+│  │  ProxyRepositoryReconciler                       │   │
+│  │  VirtualRepositoryReconciler                     │   │
+│  └──────────────────────────────────────────────────┘   │
+│    creates / patches child resources with owner refs     │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
+│  │ NGINX pod    │  │ NGINX pod    │  │ VirtualProxy  │  │
+│  │ (Hosted)     │  │ (Proxy)      │  │ pod (Virtual) │  │
+│  │ WebDAV + PVC │  │ proxy_pass   │  │ fan-out +     │  │
+│  └──────────────┘  └──────────────┘  │ metadata merge│  │
+│                                      └───────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+Each child workload has an **owner reference** pointing to the parent
+`MavenRepository`, so deleting the CR cascades to all managed Pods, Services,
+ConfigMaps, and Secrets (except PVCs when `deletionPolicy: Retain`).
+
+---
+
+## Roadmap
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 0 | ✅ Done | KubeOps wired up, CRD entity defined |
+| 1 | ✅ Done | Hosted repository (mvn deploy + resolve) |
+| 2 | ✅ Done | Proxy repository (cache from Maven Central) |
+| 3 | ✅ Done | Virtual repository (fan-out + metadata merge) |
+| 4 | ✅ Done | CEL validation, Events, Secret watch, deletionPolicy, Ingress |
+| 5 | ✅ Done | Prometheus metrics, Helm chart, GitHub Actions CI |
+| 6 | 🔜 Planned | Grafana dashboards, alert rules, Helm chart on ArtifactHub |
+
