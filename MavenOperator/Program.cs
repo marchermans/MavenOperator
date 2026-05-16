@@ -10,6 +10,7 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
+
 // ── KubeOps operator ─────────────────────────────────────────────────────────
 builder.Services
     .AddKubernetesOperator()
@@ -22,8 +23,10 @@ builder.Services.AddSingleton<IKubernetesResourceManager, KubernetesResourceMana
 
 // ── Type-specific reconcilers ─────────────────────────────────────────────────
 builder.Services.AddSingleton<IHostedRepositoryReconciler, HostedRepositoryReconciler>();
-builder.Services.AddSingleton<IProxyRepositoryReconciler, ProxyRepositoryReconciler>();
+builder.Services.AddSingleton<IProxyRepositoryReconciler,  ProxyRepositoryReconciler>();
 builder.Services.AddSingleton<IVirtualRepositoryReconciler, VirtualRepositoryReconciler>();
 
 using var host = builder.Build();
 await host.RunAsync();
+
+

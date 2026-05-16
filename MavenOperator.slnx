@@ -3,5 +3,7 @@
   <Project Path="MavenOperator.Tests.Integration/MavenOperator.Tests.Integration.csproj" />
   <Project Path="MavenOperator.Tests.Performance/MavenOperator.Tests.Performance.csproj" />
   <Project Path="MavenOperator.Tests.Unit/MavenOperator.Tests.Unit.csproj" />
+  <Project Path="MavenOperator.Tests.Unit.VirtualProxy/MavenOperator.Tests.Unit.VirtualProxy.csproj" />
   <Project Path="MavenOperator/MavenOperator.csproj" />
+  <Project Path="MavenOperator.VirtualProxy/MavenOperator.VirtualProxy.csproj" />
 </Solution>

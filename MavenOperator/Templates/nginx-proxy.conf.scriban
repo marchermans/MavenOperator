@@ -1,0 +1,83 @@
+## NGINX configuration for a Proxy Maven repository.
+## Rendered by NginxConfigRenderer using Scriban.
+## Variables: name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header
+##
+## The proxy caches upstream responses in an emptyDir (or PVC) volume at /var/cache/nginx/<name>.
+## Artifacts are immutable in release repos — the long inactive TTL is intentional.
+##
+## Note: using a variable for proxy_pass so NGINX resolves the upstream hostname at request
+## time (via the resolver) rather than startup, avoiding crashes when the upstream is
+## temporarily unreachable when the pod starts.
+## The path component of the upstream URL is placed in the rewrite target, NOT in the
+## proxy_pass variable, because NGINX ignores the path portion of a variable-based
+## proxy_pass directive.
+proxy_cache_path /var/cache/nginx/{{ name }}
+    levels=1:2
+    keys_zone={{ name }}_cache:10m
+    max_size=10g
+    inactive=7d
+    use_temp_path=off;
+
+server {
+    listen 80;
+
+    # Use the CoreDNS resolver inside the cluster for dynamic hostname resolution.
+    resolver kube-dns.kube-system.svc.cluster.local valid=30s ipv6=off;
+    resolver_timeout 10s;
+
+    # Health check endpoint — no auth required
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+
+    location /repository/{{ name }}/ {
+        {{ if download_policy == "Authenticated" -}}
+        auth_basic "Maven Proxy - {{ name }}";
+        auth_basic_user_file /etc/nginx/auth/download.htpasswd;
+        {{ end -}}
+
+        # Set the upstream host variable BEFORE the rewrite — rewrite with 'break' stops
+        # further rewrite-phase directives (including 'set'), so $upstream must be
+        # initialised first or NGINX will report it as uninitialized.
+        # IMPORTANT: this variable must be ONLY scheme+host (no path) because NGINX ignores
+        # the path portion of a variable-based proxy_pass; the upstream path is included in
+        # the rewrite target below.
+        set $upstream "{{ upstream_scheme_host }}";
+
+        # Rewrite strips /repository/<name>/ prefix and prepends the upstream path.
+        rewrite ^/repository/{{ name }}/(.*)$ {{ upstream_path }}/$1 break;
+
+        proxy_pass $upstream;
+
+        # Required when proxy_pass uses a variable and the upstream is HTTPS:
+        # NGINX won't negotiate SSL automatically in that case.
+        proxy_ssl_server_name on;
+        proxy_ssl_session_reuse off;
+
+        proxy_cache {{ name }}_cache;
+        proxy_cache_valid 200 206 {{ cache_ttl }};
+        proxy_cache_valid 404      1m;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_lock on;
+
+        # Only cache GET/HEAD — never cache PUT/DELETE.
+        proxy_cache_methods GET HEAD;
+
+        {{ if upstream_auth_header != "" -}}
+        proxy_set_header Authorization "{{ upstream_auth_header }}";
+        {{ end -}}
+
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Pass ETag and Last-Modified for conditional requests.
+        proxy_pass_header ETag;
+        proxy_pass_header Last-Modified;
+
+        client_max_body_size 512m;
+        proxy_read_timeout 120s;
+        proxy_connect_timeout 10s;
+    }
+}

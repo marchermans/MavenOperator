@@ -25,6 +25,7 @@
 #   --cluster <name>   k3d cluster name          (default: maven-operator-test)
 #   --namespace <ns>   Operator namespace         (default: maven-operator-system)
 #   --image <tag>      Operator container image   (default: maven-operator:dev)
+#   --proxy-image <tag> Virtual proxy image        (default: maven-virtual-proxy:dev)
 #   --no-build         Skip 'dotnet build' step (use existing binaries).
 #   --filter <expr>    Extra --filter expression passed to dotnet test.
 #   --perf-mode <m>    Performance sub-modes: smoke (default), benchmark, load, all
@@ -35,6 +36,7 @@
 # ENVIRONMENT
 #   K3D_CLUSTER_NAME   Override cluster name (alternative to --cluster).
 #   OPERATOR_IMAGE     Override image tag.
+#   VIRTUAL_PROXY_IMAGE Override virtual proxy image tag.
 #   OPERATOR_NAMESPACE Override operator namespace.
 #   KUBECONFIG         If set, the integration/e2e tests use this config
 #                      instead of spinning up k3d.
@@ -77,7 +79,8 @@ _EXTERNAL_KUBECONFIG="${KUBECONFIG:-}"
 K3D_CLUSTER_NAME="${K3D_CLUSTER_NAME:-maven-operator-test}"
 OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE:-maven-operator-system}"
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-maven-operator:dev}"
-export K3D_CLUSTER_NAME OPERATOR_NAMESPACE OPERATOR_IMAGE
+VIRTUAL_PROXY_IMAGE="${VIRTUAL_PROXY_IMAGE:-maven-virtual-proxy:dev}"
+export K3D_CLUSTER_NAME OPERATOR_NAMESPACE OPERATOR_IMAGE VIRTUAL_PROXY_IMAGE
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -100,6 +103,8 @@ while [[ $# -gt 0 ]]; do
       OPERATOR_NAMESPACE="$2"; shift 2 ;;
     --image)
       OPERATOR_IMAGE="$2"; shift 2 ;;
+    --proxy-image)
+      VIRTUAL_PROXY_IMAGE="$2"; shift 2 ;;
     --no-build)
       OPT_NO_BUILD=true; shift ;;
     --filter)
@@ -229,6 +234,7 @@ run_e2e() {
     cluster_apply_crds
     cluster_apply_rbac
     cluster_load_operator_image
+    cluster_load_virtual_proxy_image
     cluster_deploy_operator
   else
     log_info "Using external KUBECONFIG: ${KUBECONFIG}"
@@ -304,6 +310,7 @@ run_performance() {
       cluster_apply_crds
       cluster_apply_rbac
       cluster_load_operator_image
+      cluster_load_virtual_proxy_image
       cluster_deploy_operator
     else
       log_info "Using external KUBECONFIG: ${KUBECONFIG}"
@@ -432,6 +439,7 @@ log_info "Suites   : ${SUITES[*]}"
 log_info "Repo root: ${REPO_ROOT}"
 log_info "Cluster  : ${K3D_CLUSTER_NAME}  |  Namespace: ${OPERATOR_NAMESPACE}"
 log_info "Image    : ${OPERATOR_IMAGE}"
+log_info "Proxy    : ${VIRTUAL_PROXY_IMAGE}"
 log_info "Perf mode: ${PERF_MODE}"
 echo
 

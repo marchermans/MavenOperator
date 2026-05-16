@@ -1,4 +1,5 @@
 using k8s;
+using k8s.Autorest;
 using k8s.Models;
 using KubeOps.Abstractions.Entities;
 using KubeOps.KubernetesClient;
@@ -55,6 +56,14 @@ public interface IKubernetesResourceManager
         string serviceName,
         string selectorAppLabel,
         CancellationToken ct);
+
+    /// <summary>Ensures a ClusterIP Service exists exposing the given port.</summary>
+    Task<V1Service> EnsureServiceAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string serviceName,
+        string selectorAppLabel,
+        int port,
+        CancellationToken ct);
 }
 
 /// <inheritdoc/>
@@ -102,9 +111,17 @@ public sealed class KubernetesResourceManager(
             },
         };
 
-        var created = await client.CreateAsync(pvc, ct);
-        logger.LogInformation("Created PVC {Namespace}/{Name}", ns, pvcName);
-        return created;
+        try
+        {
+            var created = await client.CreateAsync(pvc, ct);
+            logger.LogInformation("Created PVC {Namespace}/{Name}", ns, pvcName);
+            return created;
+        }
+        catch (HttpOperationException ex) when (IsConflict(ex))
+        {
+            logger.LogDebug("PVC {Namespace}/{Name} already exists (race) — fetching", ns, pvcName);
+            return (await client.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct))!;
+        }
     }
 
     // ── Secret ───────────────────────────────────────────────────────────────
@@ -118,31 +135,50 @@ public sealed class KubernetesResourceManager(
         var ns = owner.Metadata.NamespaceProperty!;
         var desired = BuildSecretData(stringData);
 
-        var existing = await client.GetAsync<V1Secret>(secretName, ns, ct);
-        if (existing is not null)
+        for (var attempt = 0; attempt < 4; attempt++)
         {
-            if (DataEquals(existing.Data, desired))
+            var existing = await client.GetAsync<V1Secret>(secretName, ns, ct);
+            if (existing is not null)
             {
-                logger.LogDebug("Secret {Namespace}/{Name} is up-to-date", ns, secretName);
-                return existing;
+                if (DataEquals(existing.Data, desired))
+                {
+                    logger.LogDebug("Secret {Namespace}/{Name} is up-to-date", ns, secretName);
+                    return existing;
+                }
+
+                try
+                {
+                    existing.Data = desired;
+                    var updated = await client.UpdateAsync(existing, ct);
+                    logger.LogInformation("Updated Secret {Namespace}/{Name}", ns, secretName);
+                    return updated;
+                }
+                catch (HttpOperationException ex) when (IsConflict(ex))
+                {
+                    logger.LogDebug("Secret {Namespace}/{Name} update conflict — retrying", ns, secretName);
+                    continue;
+                }
             }
 
-            existing.Data = desired;
-            var updated = await client.UpdateAsync(existing, ct);
-            logger.LogInformation("Updated Secret {Namespace}/{Name}", ns, secretName);
-            return updated;
+            try
+            {
+                var secret = new V1Secret
+                {
+                    Metadata = BuildMeta(secretName, ns, owner, setOwnerReference: true),
+                    Type     = "Opaque",
+                    Data     = desired,
+                };
+                var created = await client.CreateAsync(secret, ct);
+                logger.LogInformation("Created Secret {Namespace}/{Name}", ns, secretName);
+                return created;
+            }
+            catch (HttpOperationException ex) when (IsConflict(ex))
+            {
+                logger.LogDebug("Secret {Namespace}/{Name} already exists (race) — retrying", ns, secretName);
+            }
         }
 
-        var secret = new V1Secret
-        {
-            Metadata = BuildMeta(secretName, ns, owner, setOwnerReference: true),
-            Type     = "Opaque",
-            Data     = desired,
-        };
-
-        var created = await client.CreateAsync(secret, ct);
-        logger.LogInformation("Created Secret {Namespace}/{Name}", ns, secretName);
-        return created;
+        throw new InvalidOperationException($"Failed to ensure Secret {ns}/{secretName} after retries.");
     }
 
     // ── ConfigMap ─────────────────────────────────────────────────────────────
@@ -155,30 +191,49 @@ public sealed class KubernetesResourceManager(
     {
         var ns = owner.Metadata.NamespaceProperty!;
 
-        var existing = await client.GetAsync<V1ConfigMap>(configMapName, ns, ct);
-        if (existing is not null)
+        for (var attempt = 0; attempt < 4; attempt++)
         {
-            if (MapsEqual(existing.Data, data))
+            var existing = await client.GetAsync<V1ConfigMap>(configMapName, ns, ct);
+            if (existing is not null)
             {
-                logger.LogDebug("ConfigMap {Namespace}/{Name} is up-to-date", ns, configMapName);
-                return existing;
+                if (MapsEqual(existing.Data, data))
+                {
+                    logger.LogDebug("ConfigMap {Namespace}/{Name} is up-to-date", ns, configMapName);
+                    return existing;
+                }
+
+                try
+                {
+                    existing.Data = new Dictionary<string, string>(data);
+                    var updated = await client.UpdateAsync(existing, ct);
+                    logger.LogInformation("Updated ConfigMap {Namespace}/{Name}", ns, configMapName);
+                    return updated;
+                }
+                catch (HttpOperationException ex) when (IsConflict(ex))
+                {
+                    logger.LogDebug("ConfigMap {Namespace}/{Name} update conflict — retrying", ns, configMapName);
+                    continue;
+                }
             }
 
-            existing.Data = new Dictionary<string, string>(data);
-            var updated = await client.UpdateAsync(existing, ct);
-            logger.LogInformation("Updated ConfigMap {Namespace}/{Name}", ns, configMapName);
-            return updated;
+            try
+            {
+                var cm = new V1ConfigMap
+                {
+                    Metadata = BuildMeta(configMapName, ns, owner, setOwnerReference: true),
+                    Data     = new Dictionary<string, string>(data),
+                };
+                var created = await client.CreateAsync(cm, ct);
+                logger.LogInformation("Created ConfigMap {Namespace}/{Name}", ns, configMapName);
+                return created;
+            }
+            catch (HttpOperationException ex) when (IsConflict(ex))
+            {
+                logger.LogDebug("ConfigMap {Namespace}/{Name} already exists (race) — retrying", ns, configMapName);
+            }
         }
 
-        var cm = new V1ConfigMap
-        {
-            Metadata = BuildMeta(configMapName, ns, owner, setOwnerReference: true),
-            Data     = new Dictionary<string, string>(data),
-        };
-
-        var created = await client.CreateAsync(cm, ct);
-        logger.LogInformation("Created ConfigMap {Namespace}/{Name}", ns, configMapName);
-        return created;
+        throw new InvalidOperationException($"Failed to ensure ConfigMap {ns}/{configMapName} after retries.");
     }
 
     // ── Deployment ───────────────────────────────────────────────────────────
@@ -194,56 +249,76 @@ public sealed class KubernetesResourceManager(
         var ns    = owner.Metadata.NamespaceProperty!;
         var labels = new Dictionary<string, string> { ["app"] = deploymentName };
 
-        var existing = await client.GetAsync<V1Deployment>(deploymentName, ns, ct);
-        if (existing is not null)
+        for (var attempt = 0; attempt < 4; attempt++)
         {
-            var currentHash = existing.Spec?.Template?.Metadata?.Annotations is { } ann
-                ? ann.TryGetValue(ConfigHashAnnotation, out var h) ? h : null
-                : null;
-
-            if (currentHash == configHash)
+            var existing = await client.GetAsync<V1Deployment>(deploymentName, ns, ct);
+            if (existing is not null)
             {
-                logger.LogDebug("Deployment {Namespace}/{Name} config unchanged", ns, deploymentName);
-                return existing;
+                var currentHash = existing.Spec?.Template?.Metadata?.Annotations is { } ann
+                    ? ann.TryGetValue(ConfigHashAnnotation, out var h) ? h : null
+                    : null;
+
+                if (currentHash == configHash)
+                {
+                    logger.LogDebug("Deployment {Namespace}/{Name} config unchanged", ns, deploymentName);
+                    return existing;
+                }
+
+                try
+                {
+                    // Config changed — update annotation to trigger rolling restart.
+                    existing.Spec!.Template.Metadata!.Annotations ??= new Dictionary<string, string>();
+                    existing.Spec.Template.Metadata.Annotations[ConfigHashAnnotation] = configHash;
+                    existing.Spec.Template.Spec = podSpec;
+
+                    var updated = await client.UpdateAsync(existing, ct);
+                    logger.LogInformation(
+                        "Updated Deployment {Namespace}/{Name} (new config hash: {Hash})",
+                        ns, deploymentName, configHash);
+                    return updated;
+                }
+                catch (HttpOperationException ex) when (IsConflict(ex))
+                {
+                    logger.LogDebug("Deployment {Namespace}/{Name} update conflict — retrying", ns, deploymentName);
+                    continue;
+                }
             }
 
-            // Config changed — update annotation to trigger rolling restart.
-            existing.Spec!.Template.Metadata!.Annotations ??= new Dictionary<string, string>();
-            existing.Spec.Template.Metadata.Annotations[ConfigHashAnnotation] = configHash;
-            existing.Spec.Template.Spec = podSpec;
-
-            var updated = await client.UpdateAsync(existing, ct);
-            logger.LogInformation(
-                "Updated Deployment {Namespace}/{Name} (new config hash: {Hash})",
-                ns, deploymentName, configHash);
-            return updated;
-        }
-
-        var deployment = new V1Deployment
-        {
-            Metadata = BuildMeta(deploymentName, ns, owner, setOwnerReference: true),
-            Spec = new V1DeploymentSpec
+            try
             {
-                Replicas = replicas,
-                Selector = new V1LabelSelector { MatchLabels = labels },
-                Template = new V1PodTemplateSpec
+                var deployment = new V1Deployment
                 {
-                    Metadata = new V1ObjectMeta
+                    Metadata = BuildMeta(deploymentName, ns, owner, setOwnerReference: true),
+                    Spec = new V1DeploymentSpec
                     {
-                        Labels      = labels,
-                        Annotations = new Dictionary<string, string>
+                        Replicas = replicas,
+                        Selector = new V1LabelSelector { MatchLabels = labels },
+                        Template = new V1PodTemplateSpec
                         {
-                            [ConfigHashAnnotation] = configHash,
+                            Metadata = new V1ObjectMeta
+                            {
+                                Labels      = labels,
+                                Annotations = new Dictionary<string, string>
+                                {
+                                    [ConfigHashAnnotation] = configHash,
+                                },
+                            },
+                            Spec = podSpec,
                         },
                     },
-                    Spec = podSpec,
-                },
-            },
-        };
+                };
 
-        var created = await client.CreateAsync(deployment, ct);
-        logger.LogInformation("Created Deployment {Namespace}/{Name}", ns, deploymentName);
-        return created;
+                var created = await client.CreateAsync(deployment, ct);
+                logger.LogInformation("Created Deployment {Namespace}/{Name}", ns, deploymentName);
+                return created;
+            }
+            catch (HttpOperationException ex) when (IsConflict(ex))
+            {
+                logger.LogDebug("Deployment {Namespace}/{Name} already exists (race) — retrying", ns, deploymentName);
+            }
+        }
+
+        throw new InvalidOperationException($"Failed to ensure Deployment {ns}/{deploymentName} after retries.");
     }
 
     // ── Service ──────────────────────────────────────────────────────────────
@@ -252,6 +327,14 @@ public sealed class KubernetesResourceManager(
         MavenRepositoryV1Alpha1 owner,
         string serviceName,
         string selectorAppLabel,
+        CancellationToken ct)
+        => await EnsureServiceAsync(owner, serviceName, selectorAppLabel, port: 80, ct);
+
+    public async Task<V1Service> EnsureServiceAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string serviceName,
+        string selectorAppLabel,
+        int port,
         CancellationToken ct)
     {
         var ns = owner.Metadata.NamespaceProperty!;
@@ -272,15 +355,33 @@ public sealed class KubernetesResourceManager(
                 Selector = new Dictionary<string, string> { ["app"] = selectorAppLabel },
                 Ports =
                 [
-                    new V1ServicePort { Name = "http", Port = 80, TargetPort = 80 },
+                    new V1ServicePort { Name = "http", Port = port, TargetPort = port },
                 ],
             },
         };
 
-        var created = await client.CreateAsync(svc, ct);
-        logger.LogInformation("Created Service {Namespace}/{Name}", ns, serviceName);
-        return created;
+        try
+        {
+            var created = await client.CreateAsync(svc, ct);
+            logger.LogInformation("Created Service {Namespace}/{Name}", ns, serviceName);
+            return created;
+        }
+        catch (HttpOperationException ex) when (IsConflict(ex))
+        {
+            // Race: already created by another reconcile; fetch and return it.
+            logger.LogDebug("Service {Namespace}/{Name} already exists (race) — fetching", ns, serviceName);
+            return (await client.GetAsync<V1Service>(serviceName, ns, ct))!;
+        }
     }
+
+    // ── Conflict-retry helpers ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if the <see cref="HttpOperationException"/> represents a 409 Conflict
+    /// or 409 AlreadyExists response from the Kubernetes API.
+    /// </summary>
+    private static bool IsConflict(HttpOperationException ex)
+        => ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

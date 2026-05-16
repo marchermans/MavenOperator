@@ -60,6 +60,9 @@ Every layer must be independently testable:
 Design code so it can be tested: prefer constructor injection, avoid static state,
 keep reconciler steps small and individually invokable. If something is hard to test,
 that is a design smell — fix the design, not the test.
+
+Before considering any task completed, and any milestones reached. Execute the `./scripts/run-tests.sh all --fast` command from the 
+project root. Which runs all tests in the underlying system to quickly verify whether your changes are actually working.
 ---
 ## Technology Choices (do not change without updating the plan)
 | Concern | Choice |

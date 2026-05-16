@@ -1,7 +1,11 @@
 using MavenOperator.Entities.Spec;
 using MavenOperator.Services;
+using MavenOperator.VirtualProxy.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using System.Diagnostics;
+using System.Net;
+using System.Text;
 
 namespace MavenOperator.Tests.Performance.Benchmarks;
 
@@ -79,6 +83,144 @@ public sealed class PerformanceBaselineTests
             "Rendered config is suspiciously small — possible empty-template bug");
         config.Length.ShouldBeLessThan(64_000,
             "Rendered config is suspiciously large — possible template loop");
+    }
+
+    // ── Phase 3: Metadata merge ────────────────────────────────────────────────
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void MetadataMerge_10Members_MustCompleteWithin_2Seconds()
+    {
+        // Pure in-process merge of 10 metadata docs (no HTTP) must be fast.
+        var docs = Enumerable.Range(1, 10)
+            .Select(i => new MavenMetadata(
+                "com.example", "artifact",
+                Enumerable.Range(1, 5).Select(v => $"{i}.{v}.0").ToList(),
+                $"{i}.5.0", $"{i}.5.0", $"20260515{i:D6}"))
+            .ToList();
+
+        var sw = Stopwatch.StartNew();
+        for (var iter = 0; iter < 100; iter++)
+            MetadataMergeService.Merge(docs);
+        sw.Stop();
+
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(2),
+            $"100 × 10-member merges took {sw.ElapsedMilliseconds} ms — expected < 2 000 ms");
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void MetadataParse_MustCompleteWithin_50Milliseconds_Per1000Calls()
+    {
+        const string xml = """
+            <metadata>
+              <groupId>com.example</groupId><artifactId>foo</artifactId>
+              <versioning>
+                <versions>
+                  <version>1.0</version><version>2.0</version><version>3.0</version>
+                </versions>
+                <latest>3.0</latest><release>3.0</release>
+                <lastUpdated>20260515120000</lastUpdated>
+              </versioning>
+            </metadata>
+            """;
+
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < 1_000; i++)
+            MetadataMergeService.ParseMetadata(xml);
+        sw.Stop();
+
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromMilliseconds(500),
+            $"1 000 parses took {sw.ElapsedMilliseconds} ms — expected < 500 ms");
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void MetadataSerialize_MustBeSubMillisecond_Per100Docs()
+    {
+        var doc = new MavenMetadata("com.example", "artifact",
+            Enumerable.Range(1, 20).Select(v => $"1.{v}.0").ToList(),
+            "1.20.0", "1.20.0", "20260515120000");
+
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < 100; i++)
+            MetadataMergeService.SerializeMetadata(doc);
+        sw.Stop();
+
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromMilliseconds(100),
+            $"100 serializations took {sw.ElapsedMilliseconds} ms — expected < 100 ms");
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task MergeMetadataAsync_5Members_MustCompleteWithin_500Milliseconds()
+    {
+        // Stubbed HTTP — this tests the fan-out parallel fetch + merge pipeline.
+        const string xmlTemplate = """
+            <metadata>
+              <groupId>g</groupId><artifactId>a</artifactId>
+              <versioning>
+                <versions><version>{0}.0</version></versions>
+                <latest>{0}.0</latest><release>{0}.0</release>
+                <lastUpdated>20260515120000</lastUpdated>
+              </versioning>
+            </metadata>
+            """;
+
+        var handler = new FakeCountHandler(i => string.Format(xmlTemplate, i));
+        var svc     = new MetadataMergeService(
+            new HttpClient(handler),
+            NullLogger<MetadataMergeService>.Instance);
+
+        var memberUrls = Enumerable.Range(1, 5)
+            .Select(i => $"http://member{i}").ToList();
+
+        var sw = Stopwatch.StartNew();
+        var result = await svc.MergeMetadataAsync(memberUrls, "g/a/maven-metadata.xml",
+            CancellationToken.None);
+        sw.Stop();
+
+        result.ShouldNotBeNull();
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromMilliseconds(500),
+            $"5-member parallel merge took {sw.ElapsedMilliseconds} ms — expected < 500 ms");
+    }
+
+    // ── Phase 3: Proxy NGINX config rendering ─────────────────────────────────
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void RenderProxyConfig_1000Iterations_MustCompleteWithin_500Milliseconds()
+    {
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < 1_000; i++)
+            _nginx.RenderProxy("perf-proxy", AuthPolicy.Anonymous,
+                "https://repo1.maven.org/maven2", "1d", "");
+        sw.Stop();
+
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromMilliseconds(500),
+            $"1 000 proxy renders took {sw.ElapsedMilliseconds} ms — expected < 500 ms");
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private sealed class FakeCountHandler(Func<int, string> xmlFactory) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var url = request.RequestUri?.ToString() ?? "";
+            for (var i = 1; i <= 10; i++)
+            {
+                if (url.Contains($"member{i}"))
+                {
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(xmlFactory(i), Encoding.UTF8, "application/xml"),
+                    });
+                }
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
     }
 }
 

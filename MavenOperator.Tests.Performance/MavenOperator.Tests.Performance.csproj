@@ -21,6 +21,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../MavenOperator/MavenOperator.csproj" />
+    <ProjectReference Include="../MavenOperator.VirtualProxy/MavenOperator.VirtualProxy.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="k6/**" CopyToOutputDirectory="PreserveNewest" />
