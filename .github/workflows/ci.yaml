@@ -15,43 +15,52 @@ env:
 
 jobs:
   # ── Compute the canonical semver for this run ───────────────────────────────
-  # Rule:
-  #   git tag  v1.2.3          →  version = "1.2.3"             (release)
-  #   push to main             →  version = "<base>-main.<sha7>" (snapshot)
-  #   push to other branch     →  version = "<base>-<branch>.<sha7>"
+  # Uses paulhatch/semantic-version which derives the version purely from the
+  # git tag history and conventional-commit messages:
   #
-  # <base> is read from the VERSION file at the repo root.
-  # The "+" build-metadata separator is avoided because Helm OCI does not allow it.
+  #   Untagged commit  →  MAJOR.MINOR.PATCH-pre.N  (N = commits since last tag)
+  #   Tagged v1.2.3    →  1.2.3                     (exact release)
+  #
+  # Major/minor bumps are driven by commit messages:
+  #   feat:  or feat(scope):            → minor bump
+  #   feat!: or BREAKING CHANGE:        → major bump
+  #   anything else                     → patch bump
   version:
     name: Compute Version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.compute.outputs.version }}
-      is_release: ${{ steps.compute.outputs.is_release }}
+      version: ${{ steps.semver.outputs.version }}
+      version_tag: ${{ steps.semver.outputs.version_tag }}
+      is_release: ${{ steps.is_release.outputs.is_release }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is required so the action can walk back to the last tag.
+          fetch-depth: 0
 
-      - name: Compute version string
-        id: compute
+      - name: Compute semantic version
+        id: semver
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "/(feat|fix|refactor|perf)!:|BREAKING CHANGE:/"
+          minor_pattern: "/feat(\\(.+\\))?:/"
+          # Snapshot format:  1.2.3-pre.4  (4 = commits since last tag)
+          version_format: "${major}.${minor}.${patch}-pre.${increment}"
+          search_commit_body: true
+          bump_each_commit: false
+
+      - name: Determine if this is a release tag
+        id: is_release
         run: |
-          BASE="$(cat VERSION | tr -d '[:space:]')"
-          SHA7="${GITHUB_SHA::7}"
-          REF="${GITHUB_REF}"
-
-          if [[ "$REF" == refs/tags/v* ]]; then
-            VERSION="${REF#refs/tags/v}"
-            IS_RELEASE="true"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "Version: ${{ steps.semver.outputs.version }} (RELEASE)"
           else
-            BRANCH="${GITHUB_REF_NAME}"
-            BRANCH_SAFE="$(echo "$BRANCH" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
-            VERSION="${BASE}-${BRANCH_SAFE}.${SHA7}"
-            IS_RELEASE="false"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "Version: ${{ steps.semver.outputs.version }} (snapshot)"
           fi
-
-          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
-          echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "Computed version: ${VERSION}  (is_release=${IS_RELEASE})"
 
   # ── Build & Unit tests ──────────────────────────────────────────────────────
   build-and-test:
@@ -337,7 +346,7 @@ jobs:
 
       # Build the full set of Docker tags from the canonical version.
       # Release (v1.2.3 tag):  1.2.3, 1.2, latest
-      # Snapshot (branch push): 0.1.0-main.abc1234, main
+      # Snapshot (any branch): 1.2.3-pre.N, <branch-name>
       - name: Compute image tags
         id: tags
         env:

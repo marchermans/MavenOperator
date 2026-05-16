@@ -469,18 +469,40 @@ KUBECONFIG=~/.kube/my-cluster.yaml ./scripts/run-tests.sh e2e
 
 ### Releasing a new version
 
-1. Bump the version number in `VERSION` (e.g. `0.1.0` → `0.2.0`).
-2. Commit: `git commit -am "chore: bump version to 0.2.0"`.
-3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+Versioning is **fully automatic** — no `VERSION` file or manual bump needed.
+The CI `version` job uses [`paulhatch/semantic-version`](https://github.com/PaulHatch/semantic-version)
+to derive the next version from git tag history and conventional-commit messages.
 
-CI will automatically:
-- Run all tests.
-- Build and push both Docker images tagged `0.2.0`, `0.2`, and `latest`.
-- Stamp `version: "0.2.0"` and `appVersion: "0.2.0"` into `Chart.yaml`.
-- Package and push the Helm chart to `oci://ghcr.io/marchermans/charts`.
+#### How the version is computed
 
-Snapshot builds on `main` are tagged `<base>-main.<sha7>` (e.g.
-`0.2.0-main.abc1234`) and the Helm chart receives the same version string.
+| Commit type | Effect |
+|-------------|--------|
+| `fix:`, `chore:`, etc. | patch bump (`1.0.0` → `1.0.1`) |
+| `feat:` or `feat(scope):` | minor bump (`1.0.0` → `1.1.0`) |
+| `feat!:`, `fix!:`, `BREAKING CHANGE:` | major bump (`1.0.0` → `2.0.0`) |
+
+**Untagged commits** produce a pre-release version: `1.2.3-pre.N`  
+(N = number of commits since the last tag).
+
+**Tagged commits** (`v1.2.3`) produce the clean release version: `1.2.3`.
+
+#### Shipping a release
+
+1. Write commits following [Conventional Commits](https://www.conventionalcommits.org/) — the type prefix determines which semver component is bumped.
+2. When ready to release, tag the commit and push:
+   ```bash
+   git tag v1.2.0
+   git push origin v1.2.0
+   ```
+3. CI will automatically:
+   - Compute version `1.2.0` (exact release — no `-pre.N` suffix).
+   - Run all tests.
+   - Build and push both Docker images tagged `1.2.0`, `1.2`, and `latest`.
+   - Stamp `version: "1.2.0"` and `appVersion: "1.2.0"` into `Chart.yaml`.
+   - Package and push the Helm chart to `oci://ghcr.io/marchermans/charts`.
+
+Snapshot builds on `main` receive the pre-release tag (e.g. `1.2.0-pre.4`)
+and are additionally tagged with the branch name (`main`).
 
 ---
 
