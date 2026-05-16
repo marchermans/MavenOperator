@@ -147,7 +147,7 @@ jobs:
           docker tag $(docker images -q | head -1) maven-virtual-proxy:ci
           docker save maven-virtual-proxy:ci -o /tmp/maven-virtual-proxy.tar
 
-      - name: Upload operator image tarball
+      - name: Upload image tarballs
         uses: actions/upload-artifact@v4
         with:
           name: docker-images
@@ -170,9 +170,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
-          version: "3.17.x"
+          version: "3.17.3"
 
       - name: Lint Helm chart
         run: helm lint charts/maven-operator
@@ -206,9 +206,6 @@ jobs:
           name: helm-chart
           path: /tmp/helm-packages/*.tgz
 
-  # ── Shared step: load pre-built images ─────────────────────────────────────
-  # (inline in each job below via download-artifact + docker load)
-
   # ── Integration tests (on push to main only, requires k3d) ─────────────────
   integration:
     name: Integration Tests
@@ -225,6 +222,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
 
       - name: Install k3d
         run: |
@@ -245,15 +245,12 @@ jobs:
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
 
-      - name: Build .NET projects
-        run: dotnet build --configuration Release
-
       - name: Run integration tests
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
         run: |
-          ./scripts/run-tests.sh integration --no-build --cleanup
+          ./scripts/run-tests.sh integration --cleanup
 
   # ── E2E tests (on push to main only, requires k3d + Maven/Gradle) ──────────
   e2e:
@@ -271,6 +268,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
 
       - name: Setup Java (Maven/Gradle toolchain)
         uses: actions/setup-java@v4
@@ -307,15 +307,12 @@ jobs:
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
 
-      - name: Build .NET projects
-        run: dotnet build --configuration Release
-
       - name: Run E2E tests
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
         run: |
-          ./scripts/run-tests.sh e2e --no-build --cleanup
+          ./scripts/run-tests.sh e2e --cleanup
 
       - name: Upload E2E test results
         if: always()
@@ -340,6 +337,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
 
       - name: Install k3d
         run: |
@@ -371,15 +371,12 @@ jobs:
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
 
-      - name: Build .NET projects
-        run: dotnet build --configuration Release
-
       - name: Run performance tests (smoke + benchmark + load)
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
         run: |
-          ./scripts/run-tests.sh performance --perf-mode all --no-build --cleanup
+          ./scripts/run-tests.sh performance --perf-mode all --cleanup
 
       - name: Upload performance test results
         if: always()
