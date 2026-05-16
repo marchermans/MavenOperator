@@ -31,6 +31,7 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
             new NginxConfigRenderer(),
+            NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<HostedRepositoryReconciler>.Instance
         );
 

@@ -27,6 +27,22 @@ spec:
           properties:
             spec:
               type: object
+              x-kubernetes-validations:
+                # Hosted must have storage
+                - rule: "self.type != 'Hosted' || has(self.storage)"
+                  message: "spec.storage is required when type is Hosted"
+                # Proxy must have upstream with a non-empty URL
+                - rule: "self.type != 'Proxy' || (has(self.upstream) && self.upstream.url != '')"
+                  message: "spec.upstream.url is required when type is Proxy"
+                # Virtual must have at least one member
+                - rule: "self.type != 'Virtual' || (has(self.virtual) && self.virtual.members.size() > 0)"
+                  message: "spec.virtual.members must be non-empty when type is Virtual"
+                # Authenticated download requires secretRefs
+                - rule: "self.auth.download.policy != 'Authenticated' || self.auth.download.secretRefs.size() > 0"
+                  message: "spec.auth.download.secretRefs must be non-empty when download policy is Authenticated"
+                # Authenticated upload requires secretRefs
+                - rule: "self.auth.upload.policy != 'Authenticated' || self.auth.upload.secretRefs.size() > 0"
+                  message: "spec.auth.upload.secretRefs must be non-empty when upload policy is Authenticated"
               properties:
                 type:
                   type: string

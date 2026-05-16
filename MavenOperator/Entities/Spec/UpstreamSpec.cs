@@ -20,6 +20,12 @@ public sealed class UpstreamSpec
     /// Optional credentials for the upstream repository.
     /// </summary>
     public UpstreamAuthSpec? Auth { get; set; }
+
+    /// <summary>
+    /// When set, a PVC of this size is used for the NGINX proxy cache instead of an emptyDir.
+    /// Example: "5Gi". Omit or leave null to use ephemeral emptyDir (default).
+    /// </summary>
+    public string? CachePvcSize { get; set; }
 }
 
 /// <summary>

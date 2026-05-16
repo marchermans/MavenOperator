@@ -31,6 +31,7 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
             new NginxConfigRenderer(),
+            NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<ProxyRepositoryReconciler>.Instance
         );
 
@@ -175,10 +176,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
         var name = $"int-px-{Guid.NewGuid().ToString("N")[..6]}";
         await cluster.CreateCredentialSecretAsync($"{name}-dl", "reader", "r3adS3cr3t!");
 
-        var entity = (await BuildEntityAsync(name, download: AuthPolicy.Authenticated));
-        // Re-create with download secretRef
-        await cluster.Client.DeleteAsync<MavenRepositoryV1Alpha1>(
-            entity.Metadata.Name!, cluster.Namespace, CancellationToken.None);
+        // Create entity directly with secretRef — CEL validation (Phase 4) requires
+        // secretRefs to be non-empty when policy is Authenticated.
         var fullEntity = new MavenRepositoryV1Alpha1
         {
             ApiVersion = "maven.operator.io/v1alpha1",
@@ -309,27 +308,27 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
     [IntegrationFact]
     public async Task Reconcile_Throws_WhenUpstreamSpecIsMissing()
     {
+        // Build an in-memory entity that bypasses API validation — CEL rules in the CRD
+        // would reject this at admission time (Phase 4), so we test the reconciler guard directly.
         var entity = new MavenRepositoryV1Alpha1
         {
-            ApiVersion = "maven.operator.io/v1alpha1",
-            Kind       = "MavenRepository",
-            Metadata   = new()
+            Metadata = new()
             {
                 Name              = $"int-px-{Guid.NewGuid().ToString("N")[..6]}",
                 NamespaceProperty = cluster.Namespace,
+                Uid               = Guid.NewGuid().ToString(),
             },
             Spec = new()
             {
                 Type     = RepositoryType.Proxy,
-                Upstream = null,          // intentionally missing
+                Upstream = null,          // intentionally missing — guarded by reconciler
                 Auth     = new(),
             },
         };
-        var created = await cluster.Client.CreateAsync<MavenRepositoryV1Alpha1>(
-            entity, CancellationToken.None);
 
+        // The reconciler must guard against this even if the API allows it (defence-in-depth).
         await Should.ThrowAsync<InvalidOperationException>(
-            () => BuildReconciler().ReconcileAsync(created, CancellationToken.None));
+            () => BuildReconciler().ReconcileAsync(entity, CancellationToken.None));
     }
 }
 

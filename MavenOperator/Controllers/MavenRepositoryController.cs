@@ -2,8 +2,10 @@ using KubeOps.Abstractions.Reconciliation.Controller;
 using KubeOps.Abstractions.Rbac;
 using KubeOps.Abstractions.Reconciliation;
 using MavenOperator.Entities;
+using MavenOperator.Entities.Spec;
 using MavenOperator.Entities.Status;
 using MavenOperator.Reconcilers;
+using MavenOperator.Services;
 
 namespace MavenOperator.Controllers;
 
@@ -17,6 +19,8 @@ public sealed class MavenRepositoryController(
     IHostedRepositoryReconciler hostedReconciler,
     IProxyRepositoryReconciler proxyReconciler,
     IVirtualRepositoryReconciler virtualReconciler,
+    IKubernetesEventService events,
+    IKubernetesResourceManager resources,
     ILogger<MavenRepositoryController> logger)
     : IEntityController<MavenRepositoryV1Alpha1>
 {
@@ -30,6 +34,10 @@ public sealed class MavenRepositoryController(
         logger.LogInformation(
             "Reconciling MavenRepository {Namespace}/{Name} (type={Type}, generation={Generation})",
             ns, name, entity.Spec.Type, entity.Metadata.Generation);
+
+        await events.PublishAsync(entity, "ReconcileStarted",
+            $"Reconciling {entity.Spec.Type} repository '{name}' (generation {entity.Metadata.Generation})",
+            ct: cancellationToken);
 
         // Mark as provisioning immediately so status reflects in-progress state.
         entity.Status.Phase = RepositoryPhase.Provisioning;
@@ -51,6 +59,10 @@ public sealed class MavenRepositoryController(
             logger.LogInformation(
                 "MavenRepository {Namespace}/{Name} reconciled successfully", ns, name);
 
+            await events.PublishAsync(entity, "ReconcileSucceeded",
+                $"{entity.Spec.Type} repository '{name}' reconciled successfully",
+                ct: cancellationToken);
+
             return ReconciliationResult<MavenRepositoryV1Alpha1>.Success(entity);
         }
         catch (Exception ex)
@@ -65,21 +77,48 @@ public sealed class MavenRepositoryController(
                 reason: "ReconciliationFailed",
                 message: ex.Message);
 
+            await events.PublishAsync(entity, "ReconcileFailed",
+                $"Reconciliation failed for '{name}': {ex.Message}",
+                type: "Warning",
+                ct: cancellationToken);
+
             // Return failure — KubeOps will requeue with exponential back-off.
             return ReconciliationResult<MavenRepositoryV1Alpha1>.Failure(entity, ex.Message, ex);
         }
     }
 
-    public Task<ReconciliationResult<MavenRepositoryV1Alpha1>> DeletedAsync(
+    public async Task<ReconciliationResult<MavenRepositoryV1Alpha1>> DeletedAsync(
         MavenRepositoryV1Alpha1 entity,
         CancellationToken cancellationToken)
     {
-        // Child resources with owner references are garbage-collected automatically by Kubernetes.
-        // PVCs with DeletionPolicy=Retain do NOT have an owner reference and are left intact.
+        var ns   = entity.Metadata.NamespaceProperty!;
+        var name = entity.Metadata.Name!;
+
         logger.LogInformation(
             "MavenRepository {Namespace}/{Name} deleted — child resources will be GC'd by owner references",
-            entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+            ns, name);
 
-        return Task.FromResult(ReconciliationResult<MavenRepositoryV1Alpha1>.Success(entity));
+        // For Hosted repos with DeletionPolicy=Delete, explicitly remove the PVC
+        // (PVCs do NOT have an owner reference when DeletionPolicy=Retain, the default).
+        if (entity.Spec.Type == Entities.Spec.RepositoryType.Hosted
+            && entity.Spec.Storage?.DeletionPolicy == DeletionPolicy.Delete)
+        {
+            var pvcName = $"{name}-pvc";
+            logger.LogInformation(
+                "DeletionPolicy=Delete: deleting PVC {Namespace}/{PvcName}", ns, pvcName);
+            await resources.DeletePvcIfExistsAsync(pvcName, ns, cancellationToken);
+        }
+
+        // For Proxy repos with a PVC cache, also clean it up on delete.
+        if (entity.Spec.Type == Entities.Spec.RepositoryType.Proxy
+            && !string.IsNullOrWhiteSpace(entity.Spec.Upstream?.CachePvcSize))
+        {
+            var cachePvcName = $"{name}-cache-pvc";
+            logger.LogInformation(
+                "Deleting proxy cache PVC {Namespace}/{PvcName}", ns, cachePvcName);
+            await resources.DeletePvcIfExistsAsync(cachePvcName, ns, cancellationToken);
+        }
+
+        return ReconciliationResult<MavenRepositoryV1Alpha1>.Success(entity);
     }
 }

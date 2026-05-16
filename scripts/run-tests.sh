@@ -19,6 +19,9 @@
 #   all           Shortcut for: unit integration e2e performance (--perf-mode all)
 #                 Runs EVERY test including BenchmarkDotNet and k6 load tests.
 #                 Use --fast to skip slow perf sub-modes (smoke only).
+#   cleanup       Tear down the k3d cluster and wipe all operator namespaces.
+#                 Can be run standalone: ./scripts/run-tests.sh cleanup
+#                 Equivalent to any other suite with --cleanup, but without running tests.
 #
 # OPTIONS
 #   --cleanup          Delete the k3d cluster when the script exits.
@@ -45,6 +48,8 @@
 #   ./scripts/run-tests.sh                      # run unit tests only
 #   ./scripts/run-tests.sh unit integration     # unit + integration
 #   ./scripts/run-tests.sh all --cleanup        # EVERYTHING: unit+int+e2e+perf(all), tear down
+#   ./scripts/run-tests.sh cleanup              # tear down cluster only, no tests
+#   ./scripts/run-tests.sh cleanup --cluster my-cluster  # tear down a named cluster
 #   ./scripts/run-tests.sh all --fast           # unit+int+e2e+perf(smoke only) — quick
 #   ./scripts/run-tests.sh e2e --no-build       # e2e with pre-built image
 #   ./scripts/run-tests.sh performance          # perf smoke tests (xUnit, no cluster)
@@ -85,7 +90,7 @@ export K3D_CLUSTER_NAME OPERATOR_NAMESPACE OPERATOR_IMAGE VIRTUAL_PROXY_IMAGE
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    unit|integration|e2e|performance)
+    unit|integration|e2e|performance|cleanup)
       SUITES+=("$1"); shift ;;
     all)
       SUITES=(unit integration e2e performance)
@@ -129,7 +134,7 @@ mapfile -t SUITES < <(printf '%s\n' "${SUITES[@]}" | awk '!seen[$0]++')
 # ── Cleanup trap (only if cluster management is needed) ───────────────────────
 _needs_cluster() {
   for s in "${SUITES[@]}"; do
-    [[ "$s" == integration || "$s" == e2e ]] && return 0
+    [[ "$s" == integration || "$s" == e2e || "$s" == cleanup ]] && return 0
     # performance with load mode needs a cluster too
     [[ "$s" == performance && ( "$PERF_MODE" == load || "$PERF_MODE" == all ) ]] && return 0
   done
@@ -137,7 +142,13 @@ _needs_cluster() {
 }
 
 if _needs_cluster && [[ "${OPT_CLEANUP}" == "true" ]]; then
-  trap 'cluster_down' EXIT
+  # Don't add the EXIT trap when the 'cleanup' suite is explicitly listed —
+  # run_cleanup() will call cluster_down directly, avoiding a double-teardown.
+  _has_cleanup_suite=false
+  for _s in "${SUITES[@]}"; do [[ "$_s" == cleanup ]] && _has_cleanup_suite=true; done
+  if [[ "$_has_cleanup_suite" == "false" ]]; then
+    trap 'cluster_down' EXIT
+  fi
 fi
 
 # Track overall exit code
@@ -168,7 +179,43 @@ run_dotnet_test() {
   fi
 }
 
-# ── Build step ────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SUITE: cleanup
+# Tears down the k3d cluster and deletes all operator-managed namespaces.
+# Safe to run standalone: ./scripts/run-tests.sh cleanup
+# ═════════════════════════════════════════════════════════════════════════════
+run_cleanup() {
+  log_section "Suite: cleanup"
+
+  # Always enable cluster deletion for this suite.
+  export K3D_CLEANUP=true
+
+  # Delete the k3d cluster (delegates to cluster_down which checks K3D_CLEANUP).
+  cluster_down
+
+  # Also remove the operator namespace if kubectl is available.
+  if command -v kubectl &>/dev/null && [[ -n "${KUBECONFIG:-}" ]] && [[ -f "${KUBECONFIG}" ]]; then
+    local ns="${OPERATOR_NAMESPACE}"
+    if kubectl get namespace "$ns" &>/dev/null 2>&1; then
+      log_step "Deleting operator namespace '${ns}'..."
+      kubectl delete namespace "$ns" --ignore-not-found &>/dev/null || true
+      log_ok "Namespace '${ns}' deleted."
+    else
+      log_info "Operator namespace '${ns}' does not exist — nothing to delete."
+    fi
+  fi
+
+  # Clean up the tmp kubeconfig.
+  local kc="${REPO_ROOT}/.tmp/kubeconfig-${K3D_CLUSTER_NAME}.yaml"
+  if [[ -f "$kc" ]]; then
+    rm -f "$kc"
+    log_ok "Removed kubeconfig ${kc}"
+  fi
+
+  log_ok "Cleanup complete."
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 build_solution() {
   log_section "Building solution"
   dotnet build "${REPO_ROOT}/MavenOperator.slnx" --configuration Debug -v minimal
@@ -433,6 +480,47 @@ EOF
   fi
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+# SUITE: cleanup
+# Tears down the k3d cluster and deletes all operator-managed namespaces.
+# Safe to run standalone: ./scripts/run-tests.sh cleanup
+# ═════════════════════════════════════════════════════════════════════════════
+run_cleanup() {
+  log_section "Suite: cleanup"
+
+  # Always enable cluster deletion for this suite.
+  export K3D_CLEANUP=true
+
+  # Delete the k3d cluster (delegates to cluster_down which checks K3D_CLEANUP).
+  cluster_down
+
+  # Also remove the operator namespace if kubectl is available and we have a kubeconfig.
+  if command -v kubectl &>/dev/null; then
+    local kc="${REPO_ROOT}/.tmp/kubeconfig-${K3D_CLUSTER_NAME}.yaml"
+    # Try the default kubeconfig path first, then fall back to KUBECONFIG env.
+    local kubeconfig_path="${KUBECONFIG:-${kc}}"
+    if [[ -f "$kubeconfig_path" ]]; then
+      local ns="${OPERATOR_NAMESPACE}"
+      if KUBECONFIG="$kubeconfig_path" kubectl get namespace "$ns" &>/dev/null 2>&1; then
+        log_step "Deleting operator namespace '${ns}'..."
+        KUBECONFIG="$kubeconfig_path" kubectl delete namespace "$ns" --ignore-not-found &>/dev/null || true
+        log_ok "Namespace '${ns}' deleted."
+      else
+        log_info "Operator namespace '${ns}' does not exist — nothing to delete."
+      fi
+    fi
+  fi
+
+  # Clean up the tmp kubeconfig.
+  local kc="${REPO_ROOT}/.tmp/kubeconfig-${K3D_CLUSTER_NAME}.yaml"
+  if [[ -f "$kc" ]]; then
+    rm -f "$kc"
+    log_ok "Removed kubeconfig ${kc}"
+  fi
+
+  log_ok "Cleanup complete."
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 log_section "MavenOperator test runner"
 log_info "Suites   : ${SUITES[*]}"
@@ -449,6 +537,7 @@ for suite in "${SUITES[@]}"; do
     integration) run_integration ;;
     e2e)         run_e2e ;;
     performance) run_performance ;;
+    cleanup)     run_cleanup ;;
   esac
 done
 

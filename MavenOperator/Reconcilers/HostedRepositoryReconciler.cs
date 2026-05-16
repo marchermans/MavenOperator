@@ -24,6 +24,7 @@ public sealed class HostedRepositoryReconciler(
     IKubernetesResourceManager resources,
     IHtpasswdService htpasswd,
     INginxConfigRenderer nginx,
+    IKubernetesEventService events,
     ILogger<HostedRepositoryReconciler> logger)
     : IHostedRepositoryReconciler
 {
@@ -39,6 +40,7 @@ public sealed class HostedRepositoryReconciler(
         var spec = entity.Spec;
 
         logger.LogInformation("[Hosted] Reconciling {Namespace}/{Name}", ns, name);
+        await events.PublishAsync(entity, "Provisioning", $"Reconciling Hosted repository '{name}'", ct: ct);
 
         // 1 ── PVC ─────────────────────────────────────────────────────────────
         var storage  = spec.Storage ?? new StorageSpec();
@@ -66,6 +68,9 @@ public sealed class HostedRepositoryReconciler(
             reason: "HtpasswdGenerated",
             message: $"{spec.Auth.Download.SecretRefs.Count} download user(s), " +
                      $"{spec.Auth.Upload.SecretRefs.Count} upload user(s) configured");
+        await events.PublishAsync(entity, "AuthUpdated",
+            $"htpasswd rebuilt: {spec.Auth.Download.SecretRefs.Count} download, {spec.Auth.Upload.SecretRefs.Count} upload user(s)",
+            ct: ct);
 
         // 3 ── NGINX ConfigMap ─────────────────────────────────────────────────
         var nginxConfig  = nginx.RenderHosted(name, spec.Auth.Download.Policy, spec.Auth.Upload.Policy);
@@ -90,12 +95,24 @@ public sealed class HostedRepositoryReconciler(
         // 6 ── Ingress (optional) ─────────────────────────────────────────────
         if (spec.Ingress.Enabled)
         {
-            // Ingress creation left for Phase 4 hardening; log intent now.
-            logger.LogInformation(
-                "[Hosted] Ingress requested for {Name} but not yet implemented (Phase 4)", name);
+            await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
+            entity.Status.SetCondition("IngressReady", isTrue: true,
+                reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
+            // Set URL from Ingress
+            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var scheme = spec.Ingress.TlsSecretRef is not null ? "https" : "http";
+            entity.Status.Url = spec.Ingress.Host is not null
+                ? $"{scheme}://{spec.Ingress.Host}{ingressPath}"
+                : ingressPath;
+        }
+        else
+        {
+            // Use cluster-internal URL
+            entity.Status.Url = $"http://{name}-svc/repository/{name}";
         }
 
         logger.LogInformation("[Hosted] {Namespace}/{Name} reconciled successfully", ns, name);
+        await events.PublishAsync(entity, "Ready", $"Hosted repository '{name}' is ready at {entity.Status.Url}", ct: ct);
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

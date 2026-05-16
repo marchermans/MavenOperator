@@ -7,17 +7,21 @@ using MavenOperator.Entities;
 using MavenOperator.Entities.Spec;
 using MavenOperator.Entities.Status;
 using MavenOperator.Reconcilers;
+using MavenOperator.Services;
 namespace MavenOperator.Tests.Unit.Controllers;
 public sealed class MavenRepositoryControllerTests
 {
     private readonly IHostedRepositoryReconciler _hosted  = Substitute.For<IHostedRepositoryReconciler>();
     private readonly IProxyRepositoryReconciler  _proxy   = Substitute.For<IProxyRepositoryReconciler>();
     private readonly IVirtualRepositoryReconciler _virtual = Substitute.For<IVirtualRepositoryReconciler>();
+    private readonly IKubernetesEventService _events = Substitute.For<IKubernetesEventService>();
+    private readonly IKubernetesResourceManager _resources = Substitute.For<IKubernetesResourceManager>();
     private readonly MavenRepositoryController _sut;
     public MavenRepositoryControllerTests()
     {
         _sut = new MavenRepositoryController(
             _hosted, _proxy, _virtual,
+            _events, _resources,
             NullLogger<MavenRepositoryController>.Instance);
     }
     [Fact]

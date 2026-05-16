@@ -4,6 +4,7 @@ using k8s.Models;
 using KubeOps.Abstractions.Entities;
 using KubeOps.KubernetesClient;
 using MavenOperator.Entities;
+using MavenOperator.Entities.Spec;
 
 namespace MavenOperator.Services;
 
@@ -64,6 +65,24 @@ public interface IKubernetesResourceManager
         string selectorAppLabel,
         int port,
         CancellationToken ct);
+
+    /// <summary>
+    /// Ensures a Kubernetes Ingress exists for the given repository.
+    /// Creates or updates the ingress based on the provided IngressSpec.
+    /// </summary>
+    Task<V1Ingress> EnsureIngressAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string ingressName,
+        string serviceName,
+        IngressSpec ingressSpec,
+        string repositoryName,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Deletes a PVC if it exists. Used when DeletionPolicy=Delete on CRD deletion.
+    /// Errors are swallowed — deletion is best-effort.
+    /// </summary>
+    Task DeletePvcIfExistsAsync(string pvcName, string namespaceName, CancellationToken ct);
 }
 
 /// <inheritdoc/>
@@ -435,6 +454,110 @@ public sealed class KubernetesResourceManager(
         foreach (var kv in a)
             if (!b.TryGetValue(kv.Key, out var bv) || kv.Value != bv) return false;
         return true;
+    }
+
+    // ── Ingress ───────────────────────────────────────────────────────────────
+
+    public async Task<V1Ingress> EnsureIngressAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string ingressName,
+        string serviceName,
+        IngressSpec ingressSpec,
+        string repositoryName,
+        CancellationToken ct)
+    {
+        var ns   = owner.Metadata.NamespaceProperty!;
+        var path = ingressSpec.Path ?? $"/repository/{repositoryName}";
+        var host = ingressSpec.Host ?? string.Empty;
+
+        var existing = await client.GetAsync<V1Ingress>(ingressName, ns, ct);
+        if (existing is not null)
+        {
+            logger.LogDebug("Ingress {Namespace}/{Name} already exists", ns, ingressName);
+            return existing;
+        }
+
+        var rules = new List<V1IngressRule>
+        {
+            new V1IngressRule
+            {
+                Host = string.IsNullOrWhiteSpace(host) ? null : host,
+                Http = new V1HTTPIngressRuleValue
+                {
+                    Paths =
+                    [
+                        new V1HTTPIngressPath
+                        {
+                            Path     = path,
+                            PathType = "Prefix",
+                            Backend  = new V1IngressBackend
+                            {
+                                Service = new V1IngressServiceBackend
+                                {
+                                    Name = serviceName,
+                                    Port = new V1ServiceBackendPort { Number = 80 },
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        };
+
+        var tls = ingressSpec.TlsSecretRef is not null
+            ? new List<V1IngressTLS>
+              {
+                  new V1IngressTLS
+                  {
+                      Hosts      = string.IsNullOrWhiteSpace(host) ? null : [host],
+                      SecretName = ingressSpec.TlsSecretRef,
+                  },
+              }
+            : null;
+
+        var ingress = new V1Ingress
+        {
+            Metadata = BuildMeta(ingressName, ns, owner, setOwnerReference: true),
+            Spec = new V1IngressSpec
+            {
+                Rules = rules,
+                Tls   = tls,
+            },
+        };
+
+        try
+        {
+            var created = await client.CreateAsync(ingress, ct);
+            logger.LogInformation("Created Ingress {Namespace}/{Name}", ns, ingressName);
+            return created;
+        }
+        catch (HttpOperationException ex) when (IsConflict(ex))
+        {
+            logger.LogDebug("Ingress {Namespace}/{Name} already exists (race) — fetching", ns, ingressName);
+            return (await client.GetAsync<V1Ingress>(ingressName, ns, ct))!;
+        }
+    }
+
+    // ── PVC deletion ──────────────────────────────────────────────────────────
+
+    public async Task DeletePvcIfExistsAsync(string pvcName, string namespaceName, CancellationToken ct)
+    {
+        try
+        {
+            var existing = await client.GetAsync<V1PersistentVolumeClaim>(pvcName, namespaceName, ct);
+            if (existing is null)
+            {
+                logger.LogDebug("PVC {Namespace}/{Name} does not exist — nothing to delete", namespaceName, pvcName);
+                return;
+            }
+
+            await client.DeleteAsync<V1PersistentVolumeClaim>(pvcName, namespaceName, ct);
+            logger.LogInformation("Deleted PVC {Namespace}/{Name} (DeletionPolicy=Delete)", namespaceName, pvcName);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to delete PVC {Namespace}/{Name}", namespaceName, pvcName);
+        }
     }
 }
 

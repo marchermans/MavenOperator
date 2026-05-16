@@ -70,6 +70,8 @@ public sealed class ClusterFixture : IAsyncLifetime
     {
         var repo = new MavenRepositoryV1Alpha1
         {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind       = "MavenRepository",
             Metadata = new V1ObjectMeta
             {
                 Name              = name,

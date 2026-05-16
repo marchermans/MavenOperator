@@ -30,6 +30,7 @@ public sealed class VirtualRepositoryReconciler(
     IKubernetesClient k8s,
     IKubernetesResourceManager resources,
     IHtpasswdService htpasswd,
+    IKubernetesEventService events,
     ILogger<VirtualRepositoryReconciler> logger)
     : IVirtualRepositoryReconciler
 {
@@ -58,6 +59,8 @@ public sealed class VirtualRepositoryReconciler(
 
         logger.LogInformation("[Virtual] Reconciling {Namespace}/{Name} with {Count} member(s)",
             ns, name, spec.Virtual.Members.Count);
+        await events.PublishAsync(entity, "Provisioning",
+            $"Reconciling Virtual repository '{name}' with {spec.Virtual.Members.Count} member(s)", ct: ct);
 
         // 1 ── Resolve member Service URLs ─────────────────────────────────────
         // Each member is a MavenRepository name in the same namespace.
@@ -128,11 +131,22 @@ public sealed class VirtualRepositoryReconciler(
         // 9 ── Ingress (optional) ─────────────────────────────────────────────
         if (spec.Ingress.Enabled)
         {
-            logger.LogInformation(
-                "[Virtual] Ingress requested for {Name} but not yet implemented (Phase 4)", name);
+            await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
+            entity.Status.SetCondition("IngressReady", isTrue: true,
+                reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
+            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var scheme = spec.Ingress.TlsSecretRef is not null ? "https" : "http";
+            entity.Status.Url = spec.Ingress.Host is not null
+                ? $"{scheme}://{spec.Ingress.Host}{ingressPath}"
+                : ingressPath;
+        }
+        else
+        {
+            entity.Status.Url = $"http://{name}-svc/repository/{name}";
         }
 
         logger.LogInformation("[Virtual] {Namespace}/{Name} reconciled successfully", ns, name);
+        await events.PublishAsync(entity, "Ready", $"Virtual repository '{name}' is ready at {entity.Status.Url}", ct: ct);
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

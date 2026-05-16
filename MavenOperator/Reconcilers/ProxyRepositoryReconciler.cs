@@ -27,6 +27,7 @@ public sealed class ProxyRepositoryReconciler(
     IKubernetesResourceManager resources,
     IHtpasswdService htpasswd,
     INginxConfigRenderer nginx,
+    IKubernetesEventService events,
     ILogger<ProxyRepositoryReconciler> logger)
     : IProxyRepositoryReconciler
 {
@@ -47,6 +48,7 @@ public sealed class ProxyRepositoryReconciler(
 
         logger.LogInformation("[Proxy] Reconciling {Namespace}/{Name} → {Upstream}",
             ns, name, spec.Upstream.Url);
+        await events.PublishAsync(entity, "Provisioning", $"Reconciling Proxy repository '{name}' → {spec.Upstream.Url}", ct: ct);
 
         // 1 ── Download htpasswd Secret ────────────────────────────────────────
         var downloadHtpasswd = await BuildHtpasswdAsync(entity, spec.Auth.Download, ns, ct);
@@ -57,6 +59,24 @@ public sealed class ProxyRepositoryReconciler(
         entity.Status.SetCondition("AuthReady", isTrue: true,
             reason: "HtpasswdGenerated",
             message: $"{spec.Auth.Download.SecretRefs.Count} download user(s) configured");
+        await events.PublishAsync(entity, "AuthUpdated",
+            $"htpasswd rebuilt: {spec.Auth.Download.SecretRefs.Count} download user(s)", ct: ct);
+
+        // 1b ── Persistent proxy cache PVC (optional) ──────────────────────────
+        var usePvcCache = !string.IsNullOrWhiteSpace(spec.Upstream.CachePvcSize);
+        if (usePvcCache)
+        {
+            var cachePvcName = $"{name}-cache-pvc";
+            await resources.EnsurePvcAsync(entity, cachePvcName, spec.Upstream.CachePvcSize!,
+                storageClassName: null, setOwnerReference: true, ct);
+            entity.Status.SetCondition("CacheReady", isTrue: true,
+                reason: "PvcCacheEnsured", message: $"PVC cache {cachePvcName} ({spec.Upstream.CachePvcSize}) ensured");
+        }
+        else
+        {
+            entity.Status.SetCondition("CacheReady", isTrue: true,
+                reason: "EmptyDirCache", message: "Using ephemeral emptyDir proxy cache");
+        }
 
         // 2 ── Upstream auth header (if upstream credentials are configured) ───
         var upstreamAuthHeader = await BuildUpstreamAuthHeaderAsync(entity, spec.Upstream, ns, ct);
@@ -76,7 +96,7 @@ public sealed class ProxyRepositoryReconciler(
         // 4 ── Deployment ──────────────────────────────────────────────────────
         var configHash = ComputeHash(nginxConfig + downloadHtpasswd);
         var deployName = $"{name}-nginx";
-        var podSpec    = BuildPodSpec(name, spec);
+        var podSpec    = BuildPodSpec(name, spec, usePvcCache);
 
         await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
 
@@ -89,11 +109,22 @@ public sealed class ProxyRepositoryReconciler(
         // 6 ── Ingress (optional) ─────────────────────────────────────────────
         if (spec.Ingress.Enabled)
         {
-            logger.LogInformation(
-                "[Proxy] Ingress requested for {Name} but not yet implemented (Phase 4)", name);
+            await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
+            entity.Status.SetCondition("IngressReady", isTrue: true,
+                reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
+            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var scheme = spec.Ingress.TlsSecretRef is not null ? "https" : "http";
+            entity.Status.Url = spec.Ingress.Host is not null
+                ? $"{scheme}://{spec.Ingress.Host}{ingressPath}"
+                : ingressPath;
+        }
+        else
+        {
+            entity.Status.Url = $"http://{name}-svc/repository/{name}";
         }
 
         logger.LogInformation("[Proxy] {Namespace}/{Name} reconciled successfully", ns, name);
+        await events.PublishAsync(entity, "Ready", $"Proxy repository '{name}' is ready at {entity.Status.Url}", ct: ct);
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -160,7 +191,7 @@ public sealed class ProxyRepositoryReconciler(
             $"Credential Secret '{secretName}' is missing the required key '{key}'.");
     }
 
-    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec)
+    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false)
     {
         var resourceRequirements = spec.Resources is not null
             ? new V1ResourceRequirements
@@ -229,13 +260,21 @@ public sealed class ProxyRepositoryReconciler(
             ],
             Volumes =
             [
-                // emptyDir for proxy cache — ephemeral, wiped on pod restart.
-                // A PVC-backed cache is a Phase 4 hardening option.
-                new V1Volume
-                {
-                    Name     = "nginx-cache",
-                    EmptyDir = new V1EmptyDirVolumeSource(),
-                },
+                // Cache volume: PVC when CachePvcSize is set; emptyDir otherwise.
+                usePvcCache
+                    ? new V1Volume
+                      {
+                          Name = "nginx-cache",
+                          PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource
+                          {
+                              ClaimName = $"{name}-cache-pvc",
+                          },
+                      }
+                    : new V1Volume
+                      {
+                          Name     = "nginx-cache",
+                          EmptyDir = new V1EmptyDirVolumeSource(),
+                      },
                 new V1Volume
                 {
                     Name      = "nginx-conf",

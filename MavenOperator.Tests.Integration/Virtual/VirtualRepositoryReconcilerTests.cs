@@ -30,6 +30,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<VirtualRepositoryReconciler>.Instance
         );
 
@@ -217,8 +218,28 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
     [IntegrationFact]
     public async Task Reconcile_EmptyMembersList_ThrowsInvalidOperation()
     {
-        var name   = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}";
-        var entity = await BuildEntityAsync(name, members: []);
+        // Build an in-memory entity — CEL validation in the CRD (Phase 4) would reject
+        // creation of a Virtual repo with 0 members. We test the reconciler guard directly
+        // (defence-in-depth) without going through the Kubernetes API.
+        var entity = new MavenRepositoryV1Alpha1
+        {
+            Metadata = new k8s.Models.V1ObjectMeta
+            {
+                Name              = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}",
+                NamespaceProperty = cluster.Namespace,
+                Uid               = Guid.NewGuid().ToString(),
+            },
+            Spec = new()
+            {
+                Type    = RepositoryType.Virtual,
+                Virtual = new() { Members = [], MetadataCacheTtlSeconds = 60 },
+                Auth    = new()
+                {
+                    Download = new() { Policy = AuthPolicy.Anonymous },
+                    Upload   = new() { Policy = AuthPolicy.Anonymous },
+                },
+            },
+        };
 
         await Should.ThrowAsync<InvalidOperationException>(
             () => BuildReconciler().ReconcileAsync(entity, CancellationToken.None));
