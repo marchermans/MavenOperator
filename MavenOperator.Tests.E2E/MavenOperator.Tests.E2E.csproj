@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- E2E tests need extra time — xunit timeout configured via xunit.runner.json -->
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector"         Version="6.0.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk"    Version="17.14.1" />
+    <PackageReference Include="xunit"                     Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Shouldly"                  Version="4.3.0" />
+    <PackageReference Include="KubeOps.KubernetesClient"  Version="10.5.0" />
+    <PackageReference Include="KubeOps.Operator"          Version="10.5.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MavenOperator/MavenOperator.csproj" />
+  </ItemGroup>
+  <!-- Copy Maven and Gradle fixture projects into output directory -->
+  <ItemGroup>
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

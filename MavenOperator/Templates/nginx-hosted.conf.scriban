@@ -1,0 +1,45 @@
+## NGINX configuration for a Hosted Maven repository.
+## Rendered by NginxConfigRenderer using Scriban.
+## Variables: name, download_policy, upload_policy
+server {
+    listen 80;
+
+    # Health check endpoint — no auth required
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+
+    location /repository/{{ name }}/ {
+        alias /var/maven/repository/;
+        autoindex on;
+
+        # WebDAV support — required for mvn deploy (PUT) and Maven tooling
+        # Note: dav_ext_methods (PROPFIND) is NOT available in the standard nginx image;
+        # Maven only needs PUT/GET/HEAD so the base dav_methods are sufficient.
+        dav_methods PUT DELETE MKCOL COPY MOVE;
+        create_full_put_path on;
+        dav_access user:rw group:r all:r;
+
+        client_max_body_size 512m;
+
+        {{ if download_policy == "Authenticated" -}}
+        # Download auth — applied to all methods; limit_except overrides for writes
+        auth_basic "Maven - {{ name }}";
+        auth_basic_user_file /etc/nginx/auth/download.htpasswd;
+        {{ end -}}
+
+        limit_except GET HEAD OPTIONS {
+            {{ if upload_policy == "Authenticated" -}}
+            auth_basic "Maven Upload - {{ name }}";
+            auth_basic_user_file /etc/nginx/upload-auth/upload.htpasswd;
+            {{ else -}}
+            # Upload policy is Anonymous — deny from the default server context,
+            # then allow all inside limit_except so writes are unrestricted
+            allow all;
+            {{ end -}}
+        }
+    }
+}
+

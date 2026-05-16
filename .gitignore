@@ -3,3 +3,7 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
+
+# Temporary files created by the test runner script
+.tmp/
+.benchmarks/

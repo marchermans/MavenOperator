@@ -1,0 +1,23 @@
+#!/bin/sh
+# Minimal Gradle wrapper — downloads Gradle 8.13 on first use if gradle is not on PATH.
+
+set -e
+
+GRADLE_VERSION="8.13"
+WRAPPER_BASE="${HOME}/.gradle/wrapper/dists"
+GRADLE_HOME="${WRAPPER_BASE}/gradle-${GRADLE_VERSION}-bin/gradle-${GRADLE_VERSION}"
+GRADLE_BIN="${GRADLE_HOME}/bin/gradle"
+
+if [ ! -f "${GRADLE_BIN}" ]; then
+    echo "[gradlew] Gradle ${GRADLE_VERSION} not found — downloading..."
+    mkdir -p "${WRAPPER_BASE}/gradle-${GRADLE_VERSION}-bin"
+    DOWNLOAD_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+    TMPZIP="$(mktemp /tmp/gradle-XXXXXX.zip)"
+    curl -fsSL "${DOWNLOAD_URL}" -o "${TMPZIP}"
+    unzip -q "${TMPZIP}" -d "${WRAPPER_BASE}/gradle-${GRADLE_VERSION}-bin/"
+    rm -f "${TMPZIP}"
+    echo "[gradlew] Gradle installed at ${GRADLE_HOME}"
+fi
+
+exec "${GRADLE_BIN}" "$@"
+

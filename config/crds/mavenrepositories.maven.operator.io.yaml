@@ -1,0 +1,131 @@
+---
+# Generated from MavenOperator CRD entity classes.
+# Group:   maven.operator.io
+# Kind:    MavenRepository
+# Version: v1alpha1
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mavenrepositories.maven.operator.io
+spec:
+  group: maven.operator.io
+  names:
+    kind: MavenRepository
+    listKind: MavenRepositoryList
+    plural: mavenrepositories
+    singular: mavenrepository
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [Hosted, Proxy, Virtual]
+                  default: Hosted
+                storage:
+                  type: object
+                  properties:
+                    size:
+                      type: string
+                      default: "10Gi"
+                    storageClassName:
+                      type: string
+                      nullable: true
+                    deletionPolicy:
+                      type: string
+                      enum: [Retain, Delete]
+                      default: Retain
+                upstream:
+                  type: object
+                  nullable: true
+                  properties:
+                    url:
+                      type: string
+                    cacheTtl:
+                      type: string
+                      default: "1d"
+                    auth:
+                      type: object
+                      nullable: true
+                      properties:
+                        secretRef:
+                          type: string
+                virtual:
+                  type: object
+                  nullable: true
+                  properties:
+                    members:
+                      type: array
+                      items:
+                        type: string
+                    metadataCacheTtlSeconds:
+                      type: integer
+                      default: 60
+                auth:
+                  type: object
+                  properties:
+                    download:
+                      type: object
+                      properties:
+                        policy:
+                          type: string
+                          enum: [Anonymous, Authenticated]
+                          default: Anonymous
+                        secretRefs:
+                          type: array
+                          items:
+                            type: string
+                    upload:
+                      type: object
+                      properties:
+                        policy:
+                          type: string
+                          enum: [Anonymous, Authenticated]
+                          default: Authenticated
+                        secretRefs:
+                          type: array
+                          items:
+                            type: string
+                ingress:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    host:
+                      type: string
+                      nullable: true
+                    path:
+                      type: string
+                      nullable: true
+                    tlsSecretRef:
+                      type: string
+                      nullable: true
+                resources:
+                  type: object
+                  nullable: true
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Type
+          type: string
+          jsonPath: .spec.type
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+

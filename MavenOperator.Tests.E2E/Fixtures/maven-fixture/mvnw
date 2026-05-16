@@ -1,0 +1,21 @@
+#!/bin/sh
+# Minimal Maven wrapper — downloads Maven 3.9.9 on first use if mvn is not on PATH.
+# Requires: Java on PATH (JAVA_HOME respected by Maven).
+
+set -e
+
+MAVEN_VERSION="3.9.15"
+WRAPPER_DIR="${HOME}/.m2/wrapper/dists/apache-maven-${MAVEN_VERSION}"
+MAVEN_BIN="${WRAPPER_DIR}/bin/mvn"
+
+if [ ! -f "${MAVEN_BIN}" ]; then
+    echo "[mvnw] Maven ${MAVEN_VERSION} not found — downloading..."
+    mkdir -p "${WRAPPER_DIR}"
+    DOWNLOAD_URL="https://downloads.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+    curl -fsSL "${DOWNLOAD_URL}" \
+        | tar -xz --strip-components=1 -C "${WRAPPER_DIR}"
+    echo "[mvnw] Maven installed at ${WRAPPER_DIR}"
+fi
+
+exec "${MAVEN_BIN}" "$@"
+

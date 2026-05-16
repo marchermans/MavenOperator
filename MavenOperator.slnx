@@ -1,4 +1,7 @@
 <Solution>
+  <Project Path="MavenOperator.Tests.E2E/MavenOperator.Tests.E2E.csproj" />
+  <Project Path="MavenOperator.Tests.Integration/MavenOperator.Tests.Integration.csproj" />
+  <Project Path="MavenOperator.Tests.Performance/MavenOperator.Tests.Performance.csproj" />
   <Project Path="MavenOperator.Tests.Unit/MavenOperator.Tests.Unit.csproj" />
   <Project Path="MavenOperator/MavenOperator.csproj" />
 </Solution>

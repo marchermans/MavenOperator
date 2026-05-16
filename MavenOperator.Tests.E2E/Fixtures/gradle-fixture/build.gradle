@@ -1,0 +1,53 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+}
+
+group   = 'io.mavenoperator.fixture'
+version = '1.0.0'
+
+// Repo URL is injected by the E2E test: -PrepoUrl=<url>
+// Separate credentials for resolve (download) and publish (upload):
+//   -PrepoUser / -PrepoPass           → upload credentials (maven-publish)
+//   -PrepoDownloadUser / -PrepoDownloadPass → download credentials (dependency resolution)
+// If download credentials are not supplied, upload credentials are used as fallback.
+def repoUrl          = project.findProperty('repoUrl')           ?: 'http://localhost/repository/test-hosted'
+def repoUser         = project.findProperty('repoUser')          ?: 'deployer'
+def repoPass         = project.findProperty('repoPass')          ?: 'secret'
+def repoDownloadUser = project.findProperty('repoDownloadUser')  ?: repoUser
+def repoDownloadPass = project.findProperty('repoDownloadPass')  ?: repoPass
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    maven {
+        url repoUrl
+        allowInsecureProtocol true
+        credentials {
+            username = repoDownloadUser
+            password = repoDownloadPass
+        }
+    }
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            url repoUrl
+            allowInsecureProtocol true
+            credentials {
+                username = repoUser
+                password = repoPass
+            }
+        }
+    }
+}
+
