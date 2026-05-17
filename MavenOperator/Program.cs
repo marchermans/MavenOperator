@@ -17,7 +17,8 @@ builder.Logging.AddConsole();
 builder.Services
     .AddKubernetesOperator()
     .AddController<MavenRepositoryController, MavenRepositoryV1Alpha1>()
-    .AddController<CredentialSecretController, V1Secret>();
+    .AddController<CredentialSecretController, V1Secret>()
+    .AddController<MavenRepositoryImportController, MavenRepositoryImportV1Alpha1>();
 
 // ── Phase 1 services ─────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IHtpasswdService, HtpasswdService>();
@@ -36,6 +37,10 @@ builder.Services.AddMetricServer(options => options.Port = 9090);
 builder.Services.AddSingleton<IHostedRepositoryReconciler, HostedRepositoryReconciler>();
 builder.Services.AddSingleton<IProxyRepositoryReconciler,  ProxyRepositoryReconciler>();
 builder.Services.AddSingleton<IVirtualRepositoryReconciler, VirtualRepositoryReconciler>();
+
+// ── Phase 7 — Import & Migration services ─────────────────────────────────────
+builder.Services.AddSingleton<IPvcAccessChecker, PvcAccessChecker>();
+builder.Services.AddSingleton<IImportJobBuilder, ImportJobBuilder>();
 
 using var host = builder.Build();
 await host.RunAsync();

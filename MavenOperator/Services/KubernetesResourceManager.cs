@@ -87,6 +87,17 @@ public interface IKubernetesResourceManager
         CancellationToken ct);
 
     /// <summary>
+    /// Ensures a Prometheus PodMonitor exists for repository pod scraping.
+    /// Returns false when the PodMonitor CRD is not installed on the target cluster.
+    /// </summary>
+    Task<bool> EnsurePodMonitorAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string podMonitorName,
+        string selectorAppLabel,
+        MetricsSpec metrics,
+        CancellationToken ct);
+
+    /// <summary>
     /// Deletes a PVC if it exists. Used when DeletionPolicy=Delete on CRD deletion.
     /// Errors are swallowed — deletion is best-effort.
     /// </summary>
@@ -96,11 +107,23 @@ public interface IKubernetesResourceManager
 /// <inheritdoc/>
 public sealed class KubernetesResourceManager(
     IKubernetesClient client,
+    IKubernetes? kubernetes,
     ILogger<KubernetesResourceManager> logger)
     : IKubernetesResourceManager
 {
+    public KubernetesResourceManager(
+        IKubernetesClient client,
+        ILogger<KubernetesResourceManager> logger)
+        : this(client, kubernetes: null, logger)
+    {
+    }
+
     private const string ManagedByLabel   = "maven.operator.io/managed-by";
     private const string ConfigHashAnnotation = "maven.operator.io/config-hash";
+    private const string PodMonitorApiGroup = "monitoring.coreos.com";
+    private const string PodMonitorApiVersion = "v1";
+    private const string PodMonitorPlural = "podmonitors";
+    private const string FieldManager = "maven-operator";
 
     // ── PVC ──────────────────────────────────────────────────────────────────
 
@@ -415,6 +438,12 @@ public sealed class KubernetesResourceManager(
     private static bool IsConflict(HttpOperationException ex)
         => ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict;
 
+    private static bool IsNotFound(HttpOperationException ex)
+        => ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound;
+
+    private static bool IsForbidden(HttpOperationException ex)
+        => ex.Response?.StatusCode == System.Net.HttpStatusCode.Forbidden;
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static V1ObjectMeta BuildMeta(
@@ -548,6 +577,107 @@ public sealed class KubernetesResourceManager(
         {
             logger.LogDebug("Ingress {Namespace}/{Name} already exists (race) — fetching", ns, ingressName);
             return (await client.GetAsync<V1Ingress>(ingressName, ns, ct))!;
+        }
+    }
+
+    // ── PodMonitor ─────────────────────────────────────────────────────────────
+
+    public async Task<bool> EnsurePodMonitorAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string podMonitorName,
+        string selectorAppLabel,
+        MetricsSpec metrics,
+        CancellationToken ct)
+    {
+        if (kubernetes is null)
+        {
+            logger.LogDebug(
+                "Raw Kubernetes client unavailable; skipping PodMonitor {Name}",
+                podMonitorName);
+            return false;
+        }
+
+        var ns = owner.Metadata.NamespaceProperty!;
+        _ = metrics;
+
+        var podMonitor = new Dictionary<string, object?>
+        {
+            ["apiVersion"] = $"{PodMonitorApiGroup}/{PodMonitorApiVersion}",
+            ["kind"] = "PodMonitor",
+            ["metadata"] = new Dictionary<string, object?>
+            {
+                ["name"] = podMonitorName,
+                ["namespace"] = ns,
+                ["labels"] = new Dictionary<string, string>
+                {
+                    [ManagedByLabel] = owner.Metadata.Name!,
+                    ["maven.operator.io/repo"] = owner.Metadata.Name!,
+                },
+                ["ownerReferences"] = new[] { owner.MakeOwnerReference() },
+            },
+            ["spec"] = new Dictionary<string, object?>
+            {
+                ["selector"] = new Dictionary<string, object?>
+                {
+                    ["matchLabels"] = new Dictionary<string, string>
+                    {
+                        ["app"] = selectorAppLabel,
+                    },
+                },
+                ["podMetricsEndpoints"] = new object[]
+                {
+                    new Dictionary<string, string>
+                    {
+                        ["port"] = "nginx-metrics",
+                        ["path"] = "/metrics",
+                        ["interval"] = "30s",
+                        ["scrapeTimeout"] = "10s",
+                    },
+                    new Dictionary<string, string>
+                    {
+                        ["port"] = "mtail-metrics",
+                        ["path"] = "/metrics",
+                        ["interval"] = "30s",
+                        ["scrapeTimeout"] = "10s",
+                    },
+                },
+            },
+        };
+
+        var patchJson = System.Text.Json.JsonSerializer.Serialize(podMonitor);
+        var patch = new V1Patch(patchJson, V1Patch.PatchType.ApplyPatch);
+
+        try
+        {
+            await kubernetes.CustomObjects.PatchNamespacedCustomObjectAsync(
+                patch,
+                PodMonitorApiGroup,
+                PodMonitorApiVersion,
+                ns,
+                PodMonitorPlural,
+                podMonitorName,
+                fieldManager: FieldManager,
+                force: true,
+                cancellationToken: ct);
+
+            logger.LogInformation("Ensured PodMonitor {Namespace}/{Name}", ns, podMonitorName);
+            return true;
+        }
+        catch (HttpOperationException ex) when (IsNotFound(ex))
+        {
+            logger.LogDebug(
+                "PodMonitor CRD unavailable on cluster; skipping PodMonitor {Namespace}/{Name}",
+                ns,
+                podMonitorName);
+            return false;
+        }
+        catch (HttpOperationException ex) when (IsForbidden(ex))
+        {
+            logger.LogWarning(
+                "Missing RBAC to manage PodMonitor {Namespace}/{Name}; skipping PodMonitor creation",
+                ns,
+                podMonitorName);
+            return false;
         }
     }
 

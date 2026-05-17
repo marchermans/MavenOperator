@@ -16,6 +16,13 @@ public sealed class StorageSpec
     public string? StorageClassName { get; set; }
 
     /// <summary>
+    /// PVC access mode. Defaults to ReadWriteMany to enable direct-write imports
+    /// and future HA deployments where multiple NGINX replicas share the same PVC.
+    /// Valid values: ReadWriteOnce, ReadWriteMany, ReadWriteOncePod.
+    /// </summary>
+    public string AccessMode { get; set; } = "ReadWriteMany";
+
+    /// <summary>
     /// Controls whether the PVC is deleted when the MavenRepository CRD is deleted.
     /// Default is Retain — artifacts are never deleted automatically.
     /// </summary>

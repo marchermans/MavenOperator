@@ -1,5 +1,5 @@
-# maven.mtail — parse structured JSON Maven access logs
-# Requires mtail v3.0.6+ for the json() decoder.
+# maven.mtail — parse structured JSON Maven access logs.
+# Uses regex extraction (instead of json()) for broad mtail compatibility.
 # Emits Prometheus metrics for scraping by Prometheus.
 
 # ── Counters ──────────────────────────────────────────────────────────────────
@@ -15,23 +15,12 @@ histogram maven_request_duration_seconds by repo, method, asset_type, status buc
 
 # ── Parsing rule ──────────────────────────────────────────────────────────────
 
-/^{.*}$/ {
-    json() {
-        /time/             { }
-        /repo/             { $repo = $0 }
-        /method/           { $method = $0 }
-        /artifact_group/   { $group = $0 }
-        /artifact_id/      { $aid = $0 }
-        /artifact_version/ { $version = $0 }
-        /asset_type/       { $atype = $0 }
-        /status/           { $status = $0 }
-        /bytes_sent/       { $bytes = $0 }
-        /request_time/     { $rt = $0 }
-        /cache_status/     { $cache = $0 }
-    }
+# Expected log format fields (from NGINX):
+# repo, method, artifact_group, artifact_id, artifact_version, asset_type,
+# status, bytes_sent, request_time, cache_status.
+/"repo":"(?P<repo>[^"]*)".*"method":"(?P<method>[^"]*)".*"artifact_group":"(?P<group>[^"]*)".*"artifact_id":"(?P<aid>[^"]*)".*"artifact_version":"(?P<version>[^"]*)".*"asset_type":"(?P<atype>[^"]*)".*"status":(?P<status>[0-9]+).*"bytes_sent":(?P<bytes>[0-9]+).*"request_time":(?P<rt>[0-9.]+).*"cache_status":"(?P<cache>[^"]*)"/ {
 
     maven_artifact_requests_total[$repo][$method][$group][$aid][$version][$atype][$status]++
-
     maven_artifact_bytes_total[$repo][$group][$aid][$atype] += $bytes
 
     maven_request_duration_seconds[$repo][$method][$atype][$status] = $rt

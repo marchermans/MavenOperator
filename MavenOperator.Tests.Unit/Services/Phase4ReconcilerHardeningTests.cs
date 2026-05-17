@@ -47,8 +47,18 @@ public sealed class Phase4ReconcilerHardeningTests
         resources.EnsureServiceAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1Service());
+        resources.EnsurePodMonitorAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<MetricsSpec>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(false));
 
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        await resources.Received(1).EnsurePodMonitorAsync(
+            entity,
+            "proxy-repo-metrics",
+            "proxy-repo-nginx",
+            Arg.Any<MetricsSpec>(),
+            Arg.Any<CancellationToken>());
 
         // emptyDir path: no PVC should be requested
         await resources.DidNotReceive().EnsurePvcAsync(
@@ -92,6 +102,9 @@ public sealed class Phase4ReconcilerHardeningTests
         resources.EnsureServiceAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1Service());
+        resources.EnsurePodMonitorAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<MetricsSpec>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(false));
 
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
 
@@ -128,6 +141,13 @@ public sealed class Phase4ReconcilerHardeningTests
         WireUpHostedMocks(resources);
 
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        await resources.Received(1).EnsurePodMonitorAsync(
+            entity,
+            "my-repo-metrics",
+            "my-repo-nginx",
+            Arg.Any<MetricsSpec>(),
+            Arg.Any<CancellationToken>());
 
         entity.Status.Url.ShouldBe("http://my-repo-svc/repository/my-repo");
     }
@@ -190,6 +210,9 @@ public sealed class Phase4ReconcilerHardeningTests
         resources.EnsureServiceAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1Service());
+        resources.EnsurePodMonitorAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<MetricsSpec>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(false));
     }
 }
 

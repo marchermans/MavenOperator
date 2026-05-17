@@ -96,6 +96,47 @@ public sealed class NginxMetricsConfigRendererTests
         r2.ShouldNotContain("$maven_repo_alpha");
     }
 
+    [Theory]
+    [InlineData("my-repo",          "my_repo")]
+    [InlineData("e2e-hosted-abc",   "e2e_hosted_abc")]
+    [InlineData("central-proxy",    "central_proxy")]
+    [InlineData("releases",         "releases")]      // no hyphens — unchanged
+    [InlineData("e2e-virt-m1-abc",  "e2e_virt_m1_abc")]
+    public void RenderHosted_HyphensInRepoName_SanitisedInNginxVariables(string repoName, string expectedVarName)
+    {
+        // NGINX variable names cannot contain hyphens — the renderer must replace them.
+        var result = _sut.RenderHosted(repoName, AuthPolicy.Anonymous, AuthPolicy.Authenticated, new MetricsSpec());
+
+        // Variable identifiers use the sanitised name
+        result.ShouldContain($"$maven_repo_{expectedVarName}");
+        result.ShouldContain($"$maven_asset_type_{expectedVarName}");
+        result.ShouldContain($"log_format maven_json_{expectedVarName}");
+
+        // URL paths still use the original name (hyphens are valid in URLs)
+        result.ShouldContain($"/repository/{repoName}/");
+
+        // Must never appear: a raw hyphenated NGINX variable
+        if (repoName.Contains('-'))
+            result.ShouldNotContain($"$maven_repo_{repoName}");
+    }
+
+    [Theory]
+    [InlineData("my-proxy",      "my_proxy")]
+    [InlineData("central-proxy", "central_proxy")]
+    public void RenderProxy_HyphensInRepoName_SanitisedInNginxVariablesAndCacheZone(string repoName, string expectedVarName)
+    {
+        var result = _sut.RenderProxy(repoName, AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2", "1d", string.Empty, new MetricsSpec());
+
+        result.ShouldContain($"$maven_repo_{expectedVarName}");
+        result.ShouldContain($"keys_zone={expectedVarName}_cache");
+        result.ShouldContain($"proxy_cache {expectedVarName}_cache");
+        result.ShouldContain($"/repository/{repoName}/");  // URL path unchanged
+
+        if (repoName.Contains('-'))
+            result.ShouldNotContain($"$maven_repo_{repoName}");
+    }
+
     // ── Proxy — metrics enabled ───────────────────────────────────────────────
 
     [Fact]
@@ -105,8 +146,10 @@ public sealed class NginxMetricsConfigRendererTests
             "https://repo1.maven.org/maven2", "1d", string.Empty,
             new MetricsSpec { Enabled = true });
 
-        result.ShouldContain("map $uri $maven_repo_central-proxy");
-        result.ShouldContain("map $uri $maven_asset_type_central-proxy");
+        // Hyphens in the repo name are replaced with underscores in NGINX variable names
+        // because NGINX identifiers cannot contain hyphens.
+        result.ShouldContain("map $uri $maven_repo_central_proxy");
+        result.ShouldContain("map $uri $maven_asset_type_central_proxy");
     }
 
     [Fact]

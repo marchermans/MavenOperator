@@ -48,7 +48,7 @@ public sealed class NginxProxyConfigRendererTests
     public void RenderProxy_ContainsCacheZoneNamed_AfterRepository()
     {
         var result = _sut.RenderProxy("my-proxy", AuthPolicy.Anonymous, UpstreamUrl, "1d", "");
-        result.ShouldContain("my-proxy_cache");
+        result.ShouldContain("my_proxy_cache");
     }
 
     [Theory]

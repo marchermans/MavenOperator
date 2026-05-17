@@ -57,6 +57,14 @@ spec:
                     storageClassName:
                       type: string
                       nullable: true
+                    accessMode:
+                      type: string
+                      enum: [ReadWriteOnce, ReadWriteMany, ReadWriteOncePod]
+                      default: ReadWriteMany
+                      description: >
+                        PVC access mode. Defaults to ReadWriteMany so the import Job
+                        can mount the PVC directly alongside the NGINX pod, and to
+                        support future HA deployments with multiple replicas.
                     deletionPolicy:
                       type: string
                       enum: [Retain, Delete]
@@ -70,6 +78,9 @@ spec:
                     cacheTtl:
                       type: string
                       default: "1d"
+                    cachePvcSize:
+                      type: string
+                      nullable: true
                     auth:
                       type: object
                       nullable: true
@@ -127,6 +138,36 @@ spec:
                     tlsSecretRef:
                       type: string
                       nullable: true
+                metrics:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                      description: >
+                        When true the operator injects nginx-prometheus-exporter
+                        and mtail sidecars into every NGINX pod.
+                    maxLabelCardinality:
+                      type: integer
+                      default: 10000
+                    stubStatusPort:
+                      type: integer
+                      default: 9080
+                    exporterPort:
+                      type: integer
+                      default: 9113
+                    mtailPort:
+                      type: integer
+                      default: 3903
+                    nginxExporterImage:
+                      type: string
+                      default: "nginx/nginx-prometheus-exporter:1.4"
+                    mtailImage:
+                      type: string
+                      default: "ghcr.io/google/mtail:latest"
+                    podMonitorEnabled:
+                      type: boolean
+                      default: false
                 resources:
                   type: object
                   nullable: true

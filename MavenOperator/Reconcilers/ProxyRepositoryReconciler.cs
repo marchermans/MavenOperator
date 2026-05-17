@@ -113,6 +113,25 @@ public sealed class ProxyRepositoryReconciler(
         var servicePorts = BuildServicePorts(spec.Metrics);
         await resources.EnsureServiceWithPortsAsync(entity, $"{name}-svc", deployName, servicePorts, ct);
 
+        if (spec.Metrics.Enabled)
+        {
+            var podMonitorEnsured = await resources.EnsurePodMonitorAsync(
+                entity,
+                $"{name}-metrics",
+                deployName,
+                spec.Metrics,
+                ct);
+
+            if (podMonitorEnsured)
+            {
+                entity.Status.SetCondition(
+                    "MetricsScrapeReady",
+                    isTrue: true,
+                    reason: "PodMonitorEnsured",
+                    message: $"PodMonitor '{name}-metrics' ensured.");
+            }
+        }
+
         entity.Status.SetCondition("Available", isTrue: true,
             reason: "DeploymentEnsured", message: "NGINX proxy deployment ensured");
 
@@ -248,10 +267,18 @@ public sealed class ProxyRepositoryReconciler(
             volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
             nginxVolumeMounts.Add(new V1VolumeMount { Name = "nginx-logs", MountPath = "/var/log/nginx" });
 
-            var noPrivEsc = new V1SecurityContext
+            var noPrivEscReadOnly = new V1SecurityContext
             {
                 AllowPrivilegeEscalation = false,
                 ReadOnlyRootFilesystem   = true,
+                Capabilities             = new V1Capabilities { Drop = ["ALL"] },
+            };
+
+            // mtail writes runtime state under /tmp; keep least privilege but allow writable root.
+            var noPrivEscWritableRoot = new V1SecurityContext
+            {
+                AllowPrivilegeEscalation = false,
+                ReadOnlyRootFilesystem   = false,
                 Capabilities             = new V1Capabilities { Drop = ["ALL"] },
             };
 
@@ -267,7 +294,7 @@ public sealed class ProxyRepositoryReconciler(
                     Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("32Mi") },
                     Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("10m"),  ["memory"] = new("16Mi") },
                 },
-                SecurityContext = noPrivEsc,
+                SecurityContext = noPrivEscReadOnly,
             });
 
             containers.Add(new V1Container
@@ -277,10 +304,11 @@ public sealed class ProxyRepositoryReconciler(
                 ImagePullPolicy = "IfNotPresent",
                 Args            =
                 [
-                    "--progs=/etc/mtail",
+                    "--progs=/etc/mtail/maven.mtail",
                     "--logs=/var/log/nginx/access.json",
                     $"--port={spec.Metrics.MtailPort}",
-                    "--metric_expiry_interval=168h",
+                    "--expired_metrics_gc_interval=168h",
+                    "--logtostderr",
                 ],
                 Ports        = [new V1ContainerPort { ContainerPort = spec.Metrics.MtailPort, Name = "mtail-metrics" }],
                 VolumeMounts =
@@ -293,7 +321,7 @@ public sealed class ProxyRepositoryReconciler(
                     Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("64Mi") },
                     Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("20m"),  ["memory"] = new("32Mi") },
                 },
-                SecurityContext = noPrivEsc,
+                SecurityContext = noPrivEscWritableRoot,
             });
         }
 

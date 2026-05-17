@@ -63,6 +63,25 @@ that is a design smell — fix the design, not the test.
 
 Before considering any task completed, and any milestones reached. Execute the `./scripts/run-tests.sh all --fast` command from the 
 project root. Which runs all tests in the underlying system to quickly verify whether your changes are actually working.
+
+### 12. CRDs must always be in sync with the entity classes
+Whenever a CRD entity class is added or modified (new `Spec` field, new `Status` field,
+new `[KubernetesEntity]` class), **all three** of the following must be updated in the
+same commit — never leave them out of sync:
+
+1. **`config/crds/<plural>.<group>.yaml`** — the authoritative CRD YAML applied by
+   `cluster_apply_crds` during integration and E2E test runs.
+2. **`charts/maven-operator/crds/<plural>.<group>.yaml`** — identical copy used by
+   `helm install`; the `crds/` directory in a Helm chart is applied before templates.
+3. **`charts/maven-operator/templates/`** — if the new CRD requires a ClusterRole,
+   RBAC binding, or other associated resources, add them here.
+
+The `config/crds/` and `charts/maven-operator/crds/` files must be **identical**.
+A simple `cp config/crds/*.yaml charts/maven-operator/crds/` after editing keeps them in sync.
+
+Failure to ship matching CRDs causes `kubectl apply` to reject the new resource type
+with "no kind is registered", breaking every integration and E2E test that uses the
+new kind.
 ---
 ## Technology Choices (do not change without updating the plan)
 | Concern | Choice |

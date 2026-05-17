@@ -160,6 +160,8 @@ public sealed class VirtualE2EFixture : IAsyncLifetime
             {
                 Type    = RepositoryType.Hosted,
                 Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                // Disable metrics sidecars in E2E — avoids sidecar image-pull latency.
+                Metrics = new MetricsSpec { Enabled = false },
                 Auth    = new AuthSpec
                 {
                     Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
@@ -194,6 +196,8 @@ public sealed class VirtualE2EFixture : IAsyncLifetime
                     Members                 = members,
                     MetadataCacheTtlSeconds = 60,
                 },
+                // Disable metrics sidecars in E2E — avoids sidecar image-pull latency.
+                Metrics = new MetricsSpec { Enabled = false },
                 Auth = new AuthSpec
                 {
                     Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
@@ -224,44 +228,11 @@ public sealed class VirtualE2EFixture : IAsyncLifetime
 
     private async Task WaitForNginxReadyAsync(string repoName, int timeoutSeconds = 180)
     {
-        // Step 1: wait for the Service to appear
-        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var svc = await Client.GetAsync<V1Service>(
-                    $"{repoName}-svc", OperatorNamespace, CancellationToken.None);
-                if (svc is not null) break;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-
-        if (DateTime.UtcNow >= deadline)
-            throw new TimeoutException(
-                $"Service {repoName}-svc was not created within {timeoutSeconds} s.");
-
-        // Step 2: wait for the NGINX pod to be Ready
-        deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var pods = await Client.ListAsync<V1Pod>(
-                    OperatorNamespace,
-                    labelSelector: $"app={repoName}-nginx",
-                    cancellationToken: CancellationToken.None);
-
-                if (pods.Any(p => p.Status?.ContainerStatuses?.All(cs => cs.Ready) == true))
-                    return;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-
-        throw new TimeoutException(
-            $"NGINX pod for {repoName} did not become Ready within {timeoutSeconds} s.");
+        // Delegate to the shared helper which uses PodReadyTimeoutSeconds (300 s)
+        // and emits diagnostic output on failure. The timeoutSeconds parameter
+        // is kept for backward-compat but ignored — the shared constants win.
+        await PodReadinessHelper.WaitForNginxReadyAsync(
+            Client, OperatorNamespace, repoName);
     }
 
     private async Task<string> ResolveBaseUrlAsync(string svcName)

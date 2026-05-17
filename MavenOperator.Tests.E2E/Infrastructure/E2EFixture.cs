@@ -77,6 +77,10 @@ public sealed class E2EFixture : IAsyncLifetime
             {
                 Type    = RepositoryType.Hosted,
                 Storage = new StorageSpec { Size = "2Gi", DeletionPolicy = DeletionPolicy.Delete },
+                // Disable metrics sidecars in E2E tests — the nginx-exporter and mtail
+                // images require internet pulls on cold runners which add 60-90 s of
+                // latency and are the primary cause of pod-readiness timeouts.
+                Metrics = new MetricsSpec { Enabled = false },
                 Auth    = new AuthSpec
                 {
                     Download = new AuthPolicySpec
@@ -242,42 +246,8 @@ public sealed class E2EFixture : IAsyncLifetime
 
     private async Task WaitForServiceAsync()
     {
-        // Step 1: wait for the Service to be created by the operator.
-        var deadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var svc = await Client.GetAsync<V1Service>(
-                    $"{RepositoryName}-svc", OperatorNamespace, CancellationToken.None);
-                if (svc is not null) break;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-        if (DateTime.UtcNow >= deadline)
-            throw new TimeoutException(
-                $"Service {RepositoryName}-svc was not created within 120 s. Is the operator running?");
-
-        // Step 2: wait for the NGINX pod to become Ready (up to 120 s more).
-        deadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var pods = await Client.ListAsync<V1Pod>(
-                    OperatorNamespace,
-                    labelSelector: $"app={RepositoryName}-nginx",
-                    cancellationToken: CancellationToken.None);
-                var ready = pods.Any(p =>
-                    p.Status?.ContainerStatuses?.All(cs => cs.Ready) == true);
-                if (ready) return;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-        throw new TimeoutException(
-            $"NGINX pod for {RepositoryName} did not become Ready within 120 s.");
+        await PodReadinessHelper.WaitForNginxReadyAsync(
+            Client, OperatorNamespace, RepositoryName);
     }
 
     /// <summary>

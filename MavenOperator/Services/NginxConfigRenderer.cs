@@ -70,6 +70,10 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         return HostedTemplate.Render(new
         {
             name             = name,
+            // NGINX variable names may only contain [a-zA-Z0-9_].
+            // Replace hyphens (and any other invalid chars) with underscores so
+            // map/log_format identifiers such as $maven_repo_<var_name> are valid.
+            var_name         = ToNginxVarName(name),
             download_policy  = downloadPolicy.ToString(),
             upload_policy    = uploadPolicy.ToString(),
             metrics_enabled  = metrics.Enabled,
@@ -97,6 +101,7 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         return ProxyTemplate.Render(new
         {
             name                  = name,
+            var_name              = ToNginxVarName(name),
             download_policy       = downloadPolicy.ToString(),
             upstream_scheme_host  = upstreamSchemeHost,
             upstream_path         = upstreamPath,
@@ -109,4 +114,13 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
 
     /// <inheritdoc/>
     public string RenderMtailConfig() => MtailProgram;
+
+    /// <summary>
+    /// Converts a Kubernetes resource name (which may contain hyphens) into a
+    /// string that is safe for use inside an NGINX variable name.
+    /// NGINX variable names: [a-zA-Z0-9_] only — hyphens are not allowed.
+    /// Example: "e2e-hosted-abc123" → "e2e_hosted_abc123"
+    /// </summary>
+    private static string ToNginxVarName(string name) =>
+        System.Text.RegularExpressions.Regex.Replace(name, @"[^a-zA-Z0-9_]", "_");
 }

@@ -1,31 +1,35 @@
 ## NGINX configuration for a Proxy Maven repository.
 ## Rendered by NginxConfigRenderer using Scriban.
-## Variables: name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header, metrics_enabled, stub_status_port
+## Variables: name, var_name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header, metrics_enabled, stub_status_port
+##
+## 'name'     — the Kubernetes resource name, used in URL paths and auth realm strings.
+##              May contain hyphens (e.g. "my-proxy").
+## 'var_name' — name sanitised for NGINX identifiers (hyphens → underscores, e.g. "my_proxy").
 ##
 ## The proxy caches upstream responses in an emptyDir (or PVC) volume at /var/cache/nginx/<name>.
 
 # ── Maven coordinate extraction (http context) ─────────────────────────────
-map $uri $maven_repo_{{ name }} {
+map $uri $maven_repo_{{ var_name }} {
     ~^/repository/(?P<repo>[^/]+)/  $repo;
     default                          "-";
 }
 
-map $uri $maven_artifact_group_{{ name }} {
+map $uri $maven_artifact_group_{{ var_name }} {
     ~^/repository/[^/]+/(?P<g>(?:[^/]+/)+)[^/]+/[^/]+/[^/]+$  $g;
     default "-";
 }
 
-map $uri $maven_artifact_id_{{ name }} {
+map $uri $maven_artifact_id_{{ var_name }} {
     ~^/repository/[^/]+/(?:[^/]+/)+(?P<a>[^/]+)/[^/]+/[^/]+$  $a;
     default "-";
 }
 
-map $uri $maven_artifact_version_{{ name }} {
+map $uri $maven_artifact_version_{{ var_name }} {
     ~^/repository/[^/]+/(?:[^/]+/)+[^/]+/(?P<v>[^/]+)/[^/]+$  $v;
     default "-";
 }
 
-map $uri $maven_asset_type_{{ name }} {
+map $uri $maven_asset_type_{{ var_name }} {
     ~\.jar$                 jar;
     ~\.war$                 war;
     ~\.aar$                 aar;
@@ -36,16 +40,16 @@ map $uri $maven_asset_type_{{ name }} {
 }
 
 # ── JSON access log format ──────────────────────────────────────────────────
-log_format maven_json_{{ name }} escape=json
+log_format maven_json_{{ var_name }} escape=json
     '{'
     '"time":"$time_iso8601",'
-    '"repo":"$maven_repo_{{ name }}",'
+    '"repo":"$maven_repo_{{ var_name }}",'
     '"method":"$request_method",'
     '"path":"$request_uri",'
-    '"artifact_group":"$maven_artifact_group_{{ name }}",'
-    '"artifact_id":"$maven_artifact_id_{{ name }}",'
-    '"artifact_version":"$maven_artifact_version_{{ name }}",'
-    '"asset_type":"$maven_asset_type_{{ name }}",'
+    '"artifact_group":"$maven_artifact_group_{{ var_name }}",'
+    '"artifact_id":"$maven_artifact_id_{{ var_name }}",'
+    '"artifact_version":"$maven_artifact_version_{{ var_name }}",'
+    '"asset_type":"$maven_asset_type_{{ var_name }}",'
     '"status":$status,'
     '"bytes_sent":$bytes_sent,'
     '"request_time":$request_time,'
@@ -54,9 +58,10 @@ log_format maven_json_{{ name }} escape=json
     '"remote_addr":"$remote_addr"'
     '}';
 
+# Cache path uses the filesystem path (hyphens OK); keys_zone name must be a valid NGINX identifier.
 proxy_cache_path /var/cache/nginx/{{ name }}
     levels=1:2
-    keys_zone={{ name }}_cache:10m
+    keys_zone={{ var_name }}_cache:10m
     max_size=10g
     inactive=7d
     use_temp_path=off;
@@ -96,7 +101,7 @@ server {
         {{ end -}}
 
         {{ if metrics_enabled -}}
-        access_log /var/log/nginx/access.json maven_json_{{ name }};
+        access_log /var/log/nginx/access.json maven_json_{{ var_name }};
         {{ end -}}
 
         set $upstream "{{ upstream_scheme_host }}";
@@ -108,7 +113,7 @@ server {
         proxy_ssl_server_name on;
         proxy_ssl_session_reuse off;
 
-        proxy_cache {{ name }}_cache;
+        proxy_cache {{ var_name }}_cache;
         proxy_cache_valid 200 206 {{ cache_ttl }};
         proxy_cache_valid 404      1m;
         proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;

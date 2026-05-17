@@ -68,6 +68,8 @@ public sealed class ProxyE2EFixture : IAsyncLifetime
                     Url      = UpstreamUrl,
                     CacheTtl = "1d",
                 },
+                // Disable metrics sidecars in E2E tests to avoid slow image pulls.
+                Metrics = new MetricsSpec { Enabled = false },
                 Auth = new AuthSpec
                 {
                     Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
@@ -175,41 +177,8 @@ public sealed class ProxyE2EFixture : IAsyncLifetime
 
     private async Task WaitForServiceAsync()
     {
-        // Step 1: wait for Service
-        var deadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var svc = await Client.GetAsync<V1Service>(
-                    $"{RepositoryName}-svc", OperatorNamespace, CancellationToken.None);
-                if (svc is not null) break;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-        if (DateTime.UtcNow >= deadline)
-            throw new TimeoutException(
-                $"Service {RepositoryName}-svc was not created within 120 s.");
-
-        // Step 2: wait for NGINX pod Ready
-        deadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                var pods = await Client.ListAsync<V1Pod>(
-                    OperatorNamespace,
-                    labelSelector: $"app={RepositoryName}-nginx",
-                    cancellationToken: CancellationToken.None);
-                if (pods.Any(p => p.Status?.ContainerStatuses?.All(cs => cs.Ready) == true))
-                    return;
-            }
-            catch { /* not yet */ }
-            await Task.Delay(2000);
-        }
-        throw new TimeoutException(
-            $"NGINX pod for {RepositoryName} did not become Ready within 120 s.");
+        await PodReadinessHelper.WaitForNginxReadyAsync(
+            Client, OperatorNamespace, RepositoryName);
     }
 
     private async Task<string> ResolveBaseUrlAsync()

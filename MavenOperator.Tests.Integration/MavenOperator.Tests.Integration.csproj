@@ -22,9 +22,18 @@
     <!-- KubeOps client for talking to the cluster -->
     <PackageReference Include="KubeOps.KubernetesClient"  Version="10.5.0" />
     <PackageReference Include="KubeOps.Operator"          Version="10.5.0" />
+    <!-- For Phase 6B AuthProxy integration tests (WebApplicationFactory + JWT generation) -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt"  Version="8.9.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Tokens"   Version="8.9.0" />
+    <PackageReference Include="BCrypt.Net-Next"                  Version="4.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory"       Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Options"              Version="10.0.7" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../MavenOperator/MavenOperator.csproj" />
+    <ProjectReference Include="../MavenOperator.AuthProxy/MavenOperator.AuthProxy.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

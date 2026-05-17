@@ -43,9 +43,9 @@ public sealed class MetricsSpec
 
     /// <summary>
     /// Image for the mtail sidecar.
-    /// Default: gcr.io/google-containers/mtail:v3.0.8
+    /// Default: ghcr.io/google/mtail:latest
     /// </summary>
-    public string MtailImage { get; set; } = "gcr.io/google-containers/mtail:v3.0.8";
+    public string MtailImage { get; set; } = "ghcr.io/google/mtail:latest";
 
     /// <summary>
     /// When true the operator creates a PodMonitor resource (requires prometheus-operator).

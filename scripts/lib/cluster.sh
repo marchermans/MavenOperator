@@ -11,6 +11,27 @@
 K3D_CLUSTER_NAME="${K3D_CLUSTER_NAME:-maven-operator-test}"
 _K3D_KUBECONFIG="${REPO_ROOT}/.tmp/kubeconfig-${K3D_CLUSTER_NAME}.yaml"
 
+# ── Cluster sizing ────────────────────────────────────────────────────────────
+# The operator tests spin up multiple NGINX pods per test suite
+# (each MavenRepository creates at least one pod, plus operator pod, plus
+# Reposilite for import tests).  The k3s default max-pods=110 is sufficient,
+# but the default node count of 1 server + 1 agent limits total schedulable
+# capacity.  We use 2 agent nodes so we have headroom for:
+#   - operator pod                          ~1
+#   - integration tests: up to ~20 repos    ~20
+#   - e2e tests: hosted + proxy + virtual   ~10
+#   - import tests: Reposilite + nginx      ~10
+#   - performance: perf-hosted              ~5
+#   - system workloads (coredns, metrics)   ~5
+#                                           ── ~50 pods, comfortable margin
+
+# How many k3d agent nodes to provision (override via K3D_AGENTS env var).
+K3D_AGENTS="${K3D_AGENTS:-2}"
+
+# Max pods per node — raised from the k3s default of 110 to give extra headroom
+# when all agents land on a small VM/CI runner with a single agent.
+K3D_MAX_PODS="${K3D_MAX_PODS:-250}"
+
 # Create the k3d cluster (idempotent — skip if already running).
 cluster_up() {
   log_section "k3d cluster"
@@ -18,13 +39,18 @@ cluster_up() {
   if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME}\b"; then
     log_info "Cluster '${K3D_CLUSTER_NAME}' already exists — reusing."
   else
-    log_step "Creating k3d cluster '${K3D_CLUSTER_NAME}'…"
+    log_step "Creating k3d cluster '${K3D_CLUSTER_NAME}' (agents=${K3D_AGENTS}, max-pods=${K3D_MAX_PODS})…"
     k3d cluster create "${K3D_CLUSTER_NAME}" \
       --servers 1 \
-      --agents 1 \
+      --agents "${K3D_AGENTS}" \
       --wait \
-      --timeout 120s \
-      --k3s-arg '--disable=traefik@server:0' \
+      --timeout 300s \
+      --k3s-arg "--disable=traefik@server:0" \
+      --k3s-arg "--disable=metrics-server@server:0" \
+      --k3s-arg "--kubelet-arg=max-pods=${K3D_MAX_PODS}@server:*" \
+      --k3s-arg "--kubelet-arg=max-pods=${K3D_MAX_PODS}@agent:*" \
+      --k3s-arg "--kube-apiserver-arg=max-requests-inflight=800@server:0" \
+      --k3s-arg "--kube-apiserver-arg=max-mutating-requests-inflight=400@server:0" \
       --no-lb
     log_ok "Cluster '${K3D_CLUSTER_NAME}' created."
   fi
@@ -34,10 +60,90 @@ cluster_up() {
   export KUBECONFIG="$_K3D_KUBECONFIG"
   log_ok "KUBECONFIG → $KUBECONFIG"
 
-  # Wait for the node(s) to become Ready
-  log_step "Waiting for nodes to be Ready…"
-  kubectl wait node --all --for=condition=Ready --timeout=90s
+  # k3d --wait already blocks until the cluster is ready; add a short grace
+  # period poll only to handle the rare race where kubeconfig is written
+  # before the API server makes the node Ready.
+  log_step "Verifying all nodes are Ready…"
+  local _node_deadline=$(( $(date +%s) + 120 ))
+  until kubectl wait node --all --for=condition=Ready --timeout=10s &>/dev/null; do
+    if [[ $(date +%s) -gt $_node_deadline ]]; then
+      log_error "Nodes did not become Ready within 120 s after cluster creation."
+      kubectl get nodes 2>/dev/null || true
+      return 1
+    fi
+    sleep 5
+  done
   log_ok "All nodes Ready."
+
+  # Pretty-print node capacities for visibility.
+  log_info "Node capacities:"
+  kubectl get nodes \
+    -o custom-columns="NAME:.metadata.name,CPU:.status.capacity.cpu,MEMORY:.status.capacity.memory,MAX-PODS:.status.capacity.pods" \
+    2>/dev/null || true
+
+  # Pre-load sidecar images now that the cluster is confirmed healthy.
+  # This is a best-effort step — failure is non-fatal (pods will pull from
+  # the internet on first use, just slower).
+  cluster_preload_sidecar_images
+}
+
+# Pre-pull the nginx-prometheus-exporter and mtail images that the operator
+# injects as sidecars when spec.metrics.enabled=true.  Importing them into
+# containerd before any test runs prevents ImagePullBackOff / long image-pull
+# delays from causing pod-readiness timeouts in tests.
+#
+# All image references MUST be fully-qualified (registry/image:tag).
+# Short names trigger podman's interactive registry-selection prompt, which
+# breaks unattended runs.
+cluster_preload_sidecar_images() {
+  local -a SIDECAR_IMAGES=(
+    "docker.io/library/nginx:1.27-alpine"
+    "docker.io/nginx/nginx-prometheus-exporter:1.4"
+    "ghcr.io/google/mtail:latest"
+  )
+
+  log_section "Pre-loading sidecar images into k3d"
+
+  local _tmp_tar=""
+  for img in "${SIDECAR_IMAGES[@]}"; do
+    # Check if the image is already present in the cluster's containerd
+    # (skip re-import on re-runs to keep startup fast).
+    local _server_node="k3d-${K3D_CLUSTER_NAME}-server-0"
+    local _short="${img##*/}"         # e.g. nginx:1.27-alpine
+    local _short_name="${_short%%:*}" # e.g. nginx
+    local _short_tag="${_short##*:}"  # e.g. 1.27-alpine
+    # k3d nodes are always docker containers — use docker to exec into them
+    if docker exec "${_server_node}" crictl images 2>/dev/null \
+        | awk -v name="${_short_name}" -v tag="${_short_tag}" \
+            '$1 ~ name && $2 == tag { found=1 } END { exit !found }'; then
+      log_info "  ${img} already in containerd — skipping."
+      continue
+    fi
+
+    log_step "Pulling and importing '${img}'…"
+    if "${CONTAINER_RUNTIME}" pull "${img}"; then
+      _tmp_tar="$(mktemp --suffix=.tar)"
+      "${CONTAINER_RUNTIME}" save -o "${_tmp_tar}" "${img}"
+      k3d image import "${_tmp_tar}" --cluster "${K3D_CLUSTER_NAME}"
+      rm -f "${_tmp_tar}"
+      log_ok "  ${img} imported."
+    else
+      log_warn "  Could not pull '${img}' — sidecar pods may pull from internet on first use."
+    fi
+  done
+}
+
+# Save a container image to a tar file in Docker format.
+# containerd's 'ctr images import' requires Docker (v1.1+) format, not OCI.
+# podman save defaults to OCI; docker save always uses Docker format.
+# Usage: _container_save <image_tag> <output_tar>
+_container_save() {
+  local _img="$1" _out="$2"
+  if [[ "${CONTAINER_RUNTIME}" == "podman" ]]; then
+    podman save --format docker-archive -o "${_out}" "${_img}"
+  else
+    docker save -o "${_out}" "${_img}"
+  fi
 }
 
 # Tear down the k3d cluster (called on EXIT when --cleanup is set).
@@ -79,54 +185,34 @@ cluster_load_virtual_proxy_image() {
     "${REPO_ROOT}"
   log_ok "Virtual-proxy image built."
 
-  log_step "Loading image into k3d cluster '${K3D_CLUSTER_NAME}'..."
-  local _tmp_tar
-  _tmp_tar="$(mktemp --suffix=.tar)"
-  "${CONTAINER_RUNTIME}" save -o "${_tmp_tar}" "${image_tag}"
-  k3d image import "${_tmp_tar}" --cluster "${K3D_CLUSTER_NAME}"
-  rm -f "${_tmp_tar}"
-  log_ok "Virtual-proxy image '${image_tag}' loaded into cluster."
+  log_step "Loading virtual-proxy into all k3d nodes directly via containerd..."
+  local _tmp_tar_vp
+  _tmp_tar_vp="$(mktemp --suffix=.tar)"
+  _container_save "${image_tag}" "${_tmp_tar_vp}"
 
-  # Determine the in-cluster ref (podman stores under localhost/).
-  local server_node="k3d-${K3D_CLUSTER_NAME}-server-0"
-  local short_name tag_part crictl_out matched
-  short_name="${image_tag%%:*}"
-  tag_part="${image_tag#*:}"
-  crictl_out=$(docker exec "${server_node}" crictl images 2>/dev/null \
-    || podman exec "${server_node}" crictl images 2>/dev/null \
-    || true)
-  matched=$(printf '%s\n' "${crictl_out}" \
-    | awk -v name="${short_name}" -v tag="${tag_part}" \
-        '$1 ~ name && $2 == tag { print $1 ":" $2; exit }')
-  if [[ -n "${matched}" ]]; then
-    VIRTUAL_PROXY_IMAGE_IN_CLUSTER="${matched}"
-  else
-    VIRTUAL_PROXY_IMAGE_IN_CLUSTER="localhost/${image_tag}"
-  fi
+  local _all_nodes_vp
+  # k3d node list does not support --cluster; filter by cluster column in awk
+  _all_nodes_vp=$(k3d node list --no-headers 2>/dev/null | awk -v cluster="${K3D_CLUSTER_NAME}" '$3 == cluster && !/tools/ {print $1}')
+  local _canonical_vp="docker.io/library/${image_tag}"
+  # k3d nodes are always Docker containers — always use docker for node operations,
+  # regardless of which runtime (podman/docker) was used to build the image.
+  for _node in ${_all_nodes_vp}; do
+    docker exec "${_node}" ctr images remove "localhost/${image_tag}" 2>/dev/null || true
+    docker exec "${_node}" ctr images remove "${_canonical_vp}" 2>/dev/null || true
+    docker cp "${_tmp_tar_vp}" "${_node}:/tmp/_k8s_vp_import.tar"
+    docker exec "${_node}" ctr images import "/tmp/_k8s_vp_import.tar"
+    docker exec "${_node}" rm -f "/tmp/_k8s_vp_import.tar" 2>/dev/null
+    if docker exec "${_node}" ctr images ls 2>/dev/null | grep -q "localhost/${image_tag}"; then
+      docker exec "${_node}" ctr images tag "localhost/${image_tag}" "${_canonical_vp}" 2>/dev/null || true
+    fi
+    log_info "  Loaded virtual-proxy on ${_node}"
+  done
+  rm -f "${_tmp_tar_vp}"
+  log_ok "Virtual-proxy image '${image_tag}' loaded into all cluster nodes."
+
+  VIRTUAL_PROXY_IMAGE_IN_CLUSTER="${_canonical_vp}"
   export VIRTUAL_PROXY_IMAGE_IN_CLUSTER
   log_info "Virtual-proxy in-cluster image ref: ${VIRTUAL_PROXY_IMAGE_IN_CLUSTER}"
-
-  # Re-tag under canonical docker.io/library/ if needed.
-  if [[ "${VIRTUAL_PROXY_IMAGE_IN_CLUSTER}" == localhost/* ]]; then
-    local canonical_tag="docker.io/library/${image_tag}"
-    log_step "Re-tagging virtual-proxy as canonical '${canonical_tag}'..."
-    "${CONTAINER_RUNTIME}" tag "${image_tag}" "${canonical_tag}" 2>/dev/null || true
-    local _tmp_tar2
-    _tmp_tar2="$(mktemp --suffix=.tar)"
-    "${CONTAINER_RUNTIME}" save -o "${_tmp_tar2}" "${canonical_tag}"
-    k3d image import "${_tmp_tar2}" --cluster "${K3D_CLUSTER_NAME}"
-    rm -f "${_tmp_tar2}"
-    log_ok "Virtual-proxy canonical image tag also loaded."
-  fi
-
-  # Sync localhost/ tag on all k3d nodes.
-  log_step "Syncing virtual-proxy localhost/ tag on all k3d nodes..."
-  for _node in "k3d-${K3D_CLUSTER_NAME}-server-0" "k3d-${K3D_CLUSTER_NAME}-agent-0"; do
-    local _canonical="docker.io/library/${image_tag}"
-    docker exec "${_node}" ctr images remove "localhost/${image_tag}" 2>/dev/null || true
-    docker exec "${_node}" ctr images tag "${_canonical}" "localhost/${image_tag}" 2>/dev/null || true
-  done
-  log_ok "Virtual-proxy localhost/ tag synced."
 }
 
 # Build the operator container image and import it into k3d.
@@ -143,60 +229,43 @@ cluster_load_operator_image() {
     -t "${image_tag}" \
     "${REPO_ROOT}"
   log_ok "Image built."
-  log_step "Loading image into k3d cluster '${K3D_CLUSTER_NAME}'..."
-  # Export to a tar and import into k3d so both Docker and podman work.
+
+  log_step "Loading image into all k3d nodes directly via containerd..."
+  # Export to a tar once, then import directly into each node's containerd via
+  # 'docker cp + ctr images import'. This is more reliable than 'k3d image import'
+  # because containerd's import will create a new tag pointing to the new digest,
+  # whereas k3d's shared-volume approach may leave stale tags on node restarts.
+  # k3d nodes are always Docker containers — always use docker for node operations,
+  # regardless of which runtime (podman/docker) was used to build the image.
   local _tmp_tar=""
   _tmp_tar="$(mktemp --suffix=.tar)"
-  "${CONTAINER_RUNTIME}" save -o "${_tmp_tar}" "${image_tag}"
-  k3d image import "${_tmp_tar}" --cluster "${K3D_CLUSTER_NAME}"
+  _container_save "${image_tag}" "${_tmp_tar}"
+
+  local _all_nodes
+  # k3d node list does not support --cluster; filter by cluster column in awk
+  _all_nodes=$(k3d node list --no-headers 2>/dev/null | awk -v cluster="${K3D_CLUSTER_NAME}" '$3 == cluster && !/tools/ {print $1}')
+  local _canonical="docker.io/library/${image_tag}"
+  for _node in ${_all_nodes}; do
+    # Remove stale named tags so ctr import creates a fresh one.
+    docker exec "${_node}" ctr images remove "localhost/${image_tag}" 2>/dev/null || true
+    docker exec "${_node}" ctr images remove "${_canonical}" 2>/dev/null || true
+    # Copy tar directly into node filesystem and import.
+    docker cp "${_tmp_tar}" "${_node}:/tmp/_k8s_image_import.tar"
+    docker exec "${_node}" ctr images import "/tmp/_k8s_image_import.tar"
+    docker exec "${_node}" rm -f "/tmp/_k8s_image_import.tar" 2>/dev/null
+    # The import creates a 'localhost/<name>:<tag>' ref; also tag under docker.io/library/.
+    if docker exec "${_node}" ctr images ls 2>/dev/null | grep -q "localhost/${image_tag}"; then
+      docker exec "${_node}" ctr images tag "localhost/${image_tag}" "${_canonical}" 2>/dev/null || true
+    fi
+    log_info "  Loaded on ${_node}"
+  done
   rm -f "${_tmp_tar}"
-  log_ok "Image '${image_tag}' loaded into cluster."
-  # Determine the image ref as containerd inside k3d sees it.
-  # When using podman the image is stored under "localhost/<name>:<tag>".
-  # We inspect crictl on the server node to find the exact ref.
-  local server_node="k3d-${K3D_CLUSTER_NAME}-server-0"
-  local short_name tag_part crictl_out matched
-  short_name="${image_tag%%:*}"
-  tag_part="${image_tag#*:}"
-  crictl_out=$(docker exec "${server_node}" crictl images 2>/dev/null \
-    || podman exec "${server_node}" crictl images 2>/dev/null \
-    || true)
-  matched=$(printf '%s\n' "${crictl_out}" \
-    | awk -v name="${short_name}" -v tag="${tag_part}" \
-        '$1 ~ name && $2 == tag { print $1 ":" $2; exit }')
-  if [[ -n "${matched}" ]]; then
-    OPERATOR_IMAGE_IN_CLUSTER="${matched}"
-  else
-    # Fallback: assume localhost/ prefix (default for podman)
-    OPERATOR_IMAGE_IN_CLUSTER="localhost/${image_tag}"
-  fi
+  log_ok "Image '${image_tag}' loaded into all cluster nodes."
+
+  # Set the in-cluster ref used by cluster_deploy_operator.
+  OPERATOR_IMAGE_IN_CLUSTER="${_canonical}"
   export OPERATOR_IMAGE_IN_CLUSTER
   log_info "In-cluster image ref: ${OPERATOR_IMAGE_IN_CLUSTER}"
-
-  # If the image was imported under "localhost/" prefix but the deployment uses
-  # "docker.io/library/" prefix, also import under that canonical name so
-  # rollout restarts pick up the correct image.
-  if [[ "${OPERATOR_IMAGE_IN_CLUSTER}" == localhost/* ]]; then
-    local canonical_tag="docker.io/library/${image_tag}"
-    log_step "Re-tagging as canonical '${canonical_tag}' for deployment compatibility..."
-    "${CONTAINER_RUNTIME}" tag "${image_tag}" "${canonical_tag}" 2>/dev/null || true
-    local _tmp_tar2
-    _tmp_tar2="$(mktemp --suffix=.tar)"
-    "${CONTAINER_RUNTIME}" save -o "${_tmp_tar2}" "${canonical_tag}"
-    k3d image import "${_tmp_tar2}" --cluster "${K3D_CLUSTER_NAME}"
-    rm -f "${_tmp_tar2}"
-    log_ok "Canonical image tag also loaded."
-  fi
-
-  # Ensure localhost/ tag is also updated to the new digest on all k3d nodes
-  # (containerd won't overwrite an existing tag on import — must re-tag explicitly).
-  log_step "Syncing localhost/ tag on all k3d nodes..."
-  for _node in "k3d-${K3D_CLUSTER_NAME}-server-0" "k3d-${K3D_CLUSTER_NAME}-agent-0"; do
-    local _canonical="docker.io/library/${image_tag}"
-    docker exec "${_node}" ctr images remove "localhost/${image_tag}" 2>/dev/null || true
-    docker exec "${_node}" ctr images tag "${_canonical}" "localhost/${image_tag}" 2>/dev/null || true
-  done
-  log_ok "localhost/ tag synced."
 }
 
 # Deploy the operator into the cluster using a minimal dev manifest.
@@ -245,6 +314,11 @@ spec:
               value: ${virtual_proxy_image}
 EOF
 
+  # Force a rollout restart so containerd picks up the newly-imported image.
+  # Without this, if the image tag hasn't changed (e.g. always "dev"), Kubernetes
+  # won't restart the pod and the old image continues to run.
+  kubectl rollout restart deployment/maven-operator -n "$namespace"
+
   log_step "Waiting for operator Deployment to be available…"
   kubectl rollout status deployment/maven-operator \
     -n "$namespace" --timeout=120s
@@ -272,5 +346,52 @@ cluster_apply_rbac() {
       --dry-run=client -o yaml | kubectl apply -f - --server-side
     log_ok "Permissive dev RBAC created."
   fi
+
+  # Phase 7 — import Job ServiceAccount
+  # The import Job needs permission to scale Deployments (Mode C), list PVCs,
+  # and patch MavenRepositoryImport CRs for progress reporting.
+  log_step "Applying import-job ServiceAccount and RBAC…"
+  kubectl apply -f - --server-side <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maven-operator-import
+  namespace: ${namespace}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maven-operator-import
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["maven.operator.io"]
+    resources: ["mavenrepositoryimports", "mavenrepositoryimports/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maven-operator-import
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maven-operator-import
+subjects:
+  - kind: ServiceAccount
+    name: maven-operator-import
+    namespace: ${namespace}
+EOF
+  log_ok "Import-job RBAC applied."
 }
 

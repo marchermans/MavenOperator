@@ -193,6 +193,10 @@ jobs:
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          # CI runners have limited RAM — use 1 agent node but raise the pod ceiling
+          # so all test repositories can be scheduled without hitting the default 110 limit.
+          K3D_AGENTS: "1"
+          K3D_MAX_PODS: "250"
         run: ./scripts/run-tests.sh integration --cleanup
 
       - name: Upload integration test results
@@ -260,6 +264,9 @@ jobs:
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          # Raise pod ceiling for the import + e2e test repositories
+          K3D_AGENTS: "1"
+          K3D_MAX_PODS: "250"
         run: ./scripts/run-tests.sh e2e --cleanup
 
       - name: Upload E2E test results

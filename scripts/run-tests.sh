@@ -38,11 +38,19 @@
 #
 # ENVIRONMENT
 #   K3D_CLUSTER_NAME   Override cluster name (alternative to --cluster).
+#   K3D_AGENTS         Number of k3d agent nodes (default: 2 locally, 1 in CI).
+#                      Raise this on beefy dev machines for more scheduling headroom.
+#   K3D_MAX_PODS       Max pods per node (default: 250). Raised from k3s default of
+#                      110 to accommodate the full integration + e2e + import test matrix.
 #   OPERATOR_IMAGE     Override image tag.
 #   VIRTUAL_PROXY_IMAGE Override virtual proxy image tag.
 #   OPERATOR_NAMESPACE Override operator namespace.
 #   KUBECONFIG         If set, the integration/e2e tests use this config
 #                      instead of spinning up k3d.
+#   METRICS_E2E_TESTS  Set to 'true' to force-enable metrics E2E tests.
+#                      The script sets this automatically when it successfully
+#                      pre-loads ghcr.io/google/mtail:latest into k3d.
+#                      If unset and the image cannot be pulled, those tests skip.
 #
 # EXAMPLES
 #   ./scripts/run-tests.sh                      # run unit tests only
@@ -291,7 +299,32 @@ run_e2e() {
   # Export KUBECONFIG so the child dotnet process inherits it automatically.
   export KUBECONFIG
 
-  run_dotnet_test "MavenOperator.Tests.E2E" "E2E" "E2E_TESTS=true"
+  # ── Try to pre-load the mtail image so metrics E2E tests can run ────────────
+  # If the image can be pulled and imported into k3d, set METRICS_E2E_TESTS=true.
+  # If anything fails (no internet, image not found, etc.) we leave it unset so
+  # the [MetricsE2EFact]-attributed tests skip gracefully instead of timing out.
+  METRICS_E2E_ENABLED="${METRICS_E2E_TESTS:-}"
+  if [[ -z "${METRICS_E2E_ENABLED}" && -z "${_EXTERNAL_KUBECONFIG}" ]]; then
+    local mtail_image="ghcr.io/google/mtail:latest"
+    log_step "Attempting to pull and import ${mtail_image} into k3d for metrics E2E tests..."
+    if docker pull "${mtail_image}" &>/dev/null 2>&1; then
+      if k3d image import "${mtail_image}" -c "${K3D_CLUSTER_NAME}" &>/dev/null 2>&1; then
+        log_ok "mtail image imported — metrics E2E tests will run (METRICS_E2E_TESTS=true)."
+        METRICS_E2E_ENABLED="true"
+      else
+        log_warn "k3d image import for ${mtail_image} failed — metrics E2E tests will be skipped."
+      fi
+    else
+      log_warn "Could not pull ${mtail_image} — metrics E2E tests will be skipped."
+    fi
+  elif [[ "${METRICS_E2E_ENABLED}" == "true" ]]; then
+    log_info "METRICS_E2E_TESTS already set to true — metrics E2E tests will run."
+  fi
+
+  local -a e2e_env=("E2E_TESTS=true")
+  [[ "${METRICS_E2E_ENABLED}" == "true" ]] && e2e_env+=("METRICS_E2E_TESTS=true")
+
+  run_dotnet_test "MavenOperator.Tests.E2E" "E2E" "${e2e_env[@]}"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════

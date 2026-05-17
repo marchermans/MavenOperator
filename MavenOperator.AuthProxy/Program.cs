@@ -54,3 +54,17 @@ app.MapGet("/healthz", () => Results.Ok("ok"));
 
 app.Run();
 
+// Expose Program class for WebApplicationFactory in integration tests.
+public partial class Program { }
+
+namespace MavenOperator.AuthProxy
+{
+    /// <summary>
+    /// Marker class used as the type parameter for WebApplicationFactory
+    /// in integration tests. Avoids the global <c>Program</c> class name
+    /// collision when both MavenOperator and MavenOperator.AuthProxy are
+    /// referenced in the same test project.
+    /// </summary>
+    public sealed class AuthProxyEntryPoint { }
+}
+

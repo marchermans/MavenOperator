@@ -19,6 +19,48 @@ public sealed class KubernetesEventService(
         string type = "Normal",
         CancellationToken ct = default)
     {
+        await PublishCoreAsync(
+            entityName:      entity.Metadata.Name!,
+            entityNamespace: entity.Metadata.NamespaceProperty!,
+            entityUid:       entity.Metadata.Uid,
+            entityVersion:   entity.Metadata.ResourceVersion,
+            kind:            "MavenRepository",
+            reason:          reason,
+            message:         message,
+            type:            type,
+            ct:              ct);
+    }
+
+    public async Task PublishAsync(
+        MavenRepositoryImportV1Alpha1 entity,
+        string reason,
+        string message,
+        string type = "Normal",
+        CancellationToken ct = default)
+    {
+        await PublishCoreAsync(
+            entityName:      entity.Metadata.Name!,
+            entityNamespace: entity.Metadata.NamespaceProperty!,
+            entityUid:       entity.Metadata.Uid,
+            entityVersion:   entity.Metadata.ResourceVersion,
+            kind:            "MavenRepositoryImport",
+            reason:          reason,
+            message:         message,
+            type:            type,
+            ct:              ct);
+    }
+
+    private async Task PublishCoreAsync(
+        string entityName,
+        string entityNamespace,
+        string? entityUid,
+        string? entityVersion,
+        string kind,
+        string reason,
+        string message,
+        string type,
+        CancellationToken ct)
+    {
         try
         {
             var now = DateTime.UtcNow;
@@ -28,18 +70,17 @@ public sealed class KubernetesEventService(
                 Kind       = "Event",
                 Metadata   = new V1ObjectMeta
                 {
-                    // Name must be unique per event; combine entity name + timestamp ticks.
-                    Name              = $"{entity.Metadata.Name!}.{now.Ticks:x16}",
-                    NamespaceProperty = entity.Metadata.NamespaceProperty,
+                    Name              = $"{entityName}.{now.Ticks:x16}",
+                    NamespaceProperty = entityNamespace,
                 },
                 InvolvedObject = new V1ObjectReference
                 {
                     ApiVersion        = "maven.operator.io/v1alpha1",
-                    Kind              = "MavenRepository",
-                    Name              = entity.Metadata.Name,
-                    NamespaceProperty = entity.Metadata.NamespaceProperty,
-                    Uid               = entity.Metadata.Uid,
-                    ResourceVersion   = entity.Metadata.ResourceVersion,
+                    Kind              = kind,
+                    Name              = entityName,
+                    NamespaceProperty = entityNamespace,
+                    Uid               = entityUid,
+                    ResourceVersion   = entityVersion,
                 },
                 Reason             = reason,
                 Message            = message,
@@ -55,17 +96,15 @@ public sealed class KubernetesEventService(
             };
 
             await client.CreateAsync(ev, ct);
-            logger.LogDebug("Published {Type} event '{Reason}' for {Namespace}/{Name}",
-                type, reason, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+            logger.LogDebug("Published {Type} event '{Reason}' for {Namespace}/{Name} ({Kind})",
+                type, reason, entityNamespace, entityName, kind);
         }
         catch (Exception ex)
         {
-            // Event publishing is best-effort — never let it fail reconciliation.
             logger.LogWarning(ex,
                 "Failed to publish {Type} event '{Reason}' for {Namespace}/{Name}",
-                type, reason, entity.Metadata.NamespaceProperty, entity.Metadata.Name);
+                type, reason, entityNamespace, entityName);
         }
     }
 }
-
 
