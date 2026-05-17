@@ -67,6 +67,45 @@ metrics:
     interval: 30s
     scrapeTimeout: 10s
 
+  # -- NGINX sidecar images injected into every repository pod when spec.metrics.enabled=true
+  sidecars:
+    nginxExporter:
+      image: nginx/nginx-prometheus-exporter:1.4
+      resources:
+        limits:   { cpu: 50m,  memory: 32Mi }
+        requests: { cpu: 10m,  memory: 16Mi }
+    mtail:
+      image: gcr.io/google-containers/mtail:v3.0.8
+      resources:
+        limits:   { cpu: 100m, memory: 64Mi }
+        requests: { cpu: 20m,  memory: 32Mi }
+
+  # -- PodMonitor for per-pod scraping (requires prometheus-operator CRDs)
+  podMonitor:
+    enabled: false
+    # -- Additional labels for the PodMonitor
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+
+  # -- Grafana dashboard ConfigMaps (auto-loaded by Grafana sidecar)
+  grafana:
+    dashboards:
+      enabled: false
+      # -- Label Grafana uses to discover dashboard ConfigMaps
+      label: grafana_dashboard
+      labelValue: "1"
+      # -- Namespace for dashboard ConfigMaps (defaults to release namespace)
+      namespace: ""
+      # -- Grafana datasource UID to substitute into dashboard JSON
+      datasourceUid: prometheus
+    alertRules:
+      enabled: false
+      # -- Namespace for PrometheusRule (defaults to release namespace)
+      namespace: ""
+      # -- Additional labels for the PrometheusRule (e.g. release: kube-prometheus-stack)
+      additionalLabels: {}
+
 # -- RBAC ClusterRole/ClusterRoleBinding for the operator
 rbac:
   create: true

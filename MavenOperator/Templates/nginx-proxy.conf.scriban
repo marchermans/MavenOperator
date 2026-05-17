@@ -1,22 +1,79 @@
 ## NGINX configuration for a Proxy Maven repository.
 ## Rendered by NginxConfigRenderer using Scriban.
-## Variables: name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header
+## Variables: name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header, metrics_enabled, stub_status_port
 ##
 ## The proxy caches upstream responses in an emptyDir (or PVC) volume at /var/cache/nginx/<name>.
-## Artifacts are immutable in release repos — the long inactive TTL is intentional.
-##
-## Note: using a variable for proxy_pass so NGINX resolves the upstream hostname at request
-## time (via the resolver) rather than startup, avoiding crashes when the upstream is
-## temporarily unreachable when the pod starts.
-## The path component of the upstream URL is placed in the rewrite target, NOT in the
-## proxy_pass variable, because NGINX ignores the path portion of a variable-based
-## proxy_pass directive.
+
+# ── Maven coordinate extraction (http context) ─────────────────────────────
+map $uri $maven_repo_{{ name }} {
+    ~^/repository/(?P<repo>[^/]+)/  $repo;
+    default                          "-";
+}
+
+map $uri $maven_artifact_group_{{ name }} {
+    ~^/repository/[^/]+/(?P<g>(?:[^/]+/)+)[^/]+/[^/]+/[^/]+$  $g;
+    default "-";
+}
+
+map $uri $maven_artifact_id_{{ name }} {
+    ~^/repository/[^/]+/(?:[^/]+/)+(?P<a>[^/]+)/[^/]+/[^/]+$  $a;
+    default "-";
+}
+
+map $uri $maven_artifact_version_{{ name }} {
+    ~^/repository/[^/]+/(?:[^/]+/)+[^/]+/(?P<v>[^/]+)/[^/]+$  $v;
+    default "-";
+}
+
+map $uri $maven_asset_type_{{ name }} {
+    ~\.jar$                 jar;
+    ~\.war$                 war;
+    ~\.aar$                 aar;
+    ~\.pom$                 pom;
+    ~maven-metadata\.xml$   metadata;
+    ~\.(sha1|md5|sha256)$   checksum;
+    default                 other;
+}
+
+# ── JSON access log format ──────────────────────────────────────────────────
+log_format maven_json_{{ name }} escape=json
+    '{'
+    '"time":"$time_iso8601",'
+    '"repo":"$maven_repo_{{ name }}",'
+    '"method":"$request_method",'
+    '"path":"$request_uri",'
+    '"artifact_group":"$maven_artifact_group_{{ name }}",'
+    '"artifact_id":"$maven_artifact_id_{{ name }}",'
+    '"artifact_version":"$maven_artifact_version_{{ name }}",'
+    '"asset_type":"$maven_asset_type_{{ name }}",'
+    '"status":$status,'
+    '"bytes_sent":$bytes_sent,'
+    '"request_time":$request_time,'
+    '"cache_status":"$upstream_cache_status",'
+    '"upstream_rt":"$upstream_response_time",'
+    '"remote_addr":"$remote_addr"'
+    '}';
+
 proxy_cache_path /var/cache/nginx/{{ name }}
     levels=1:2
     keys_zone={{ name }}_cache:10m
     max_size=10g
     inactive=7d
     use_temp_path=off;
+
+{{ if metrics_enabled -}}
+# ── Internal stub_status (scraped by nginx-prometheus-exporter sidecar) ────
+server {
+    listen {{ stub_status_port }};
+    server_name localhost;
+    allow 127.0.0.1;
+    deny all;
+
+    location /stub_status {
+        stub_status;
+    }
+}
+{{ end -}}
 
 server {
     listen 80;
@@ -38,21 +95,16 @@ server {
         auth_basic_user_file /etc/nginx/auth/download.htpasswd;
         {{ end -}}
 
-        # Set the upstream host variable BEFORE the rewrite — rewrite with 'break' stops
-        # further rewrite-phase directives (including 'set'), so $upstream must be
-        # initialised first or NGINX will report it as uninitialized.
-        # IMPORTANT: this variable must be ONLY scheme+host (no path) because NGINX ignores
-        # the path portion of a variable-based proxy_pass; the upstream path is included in
-        # the rewrite target below.
+        {{ if metrics_enabled -}}
+        access_log /var/log/nginx/access.json maven_json_{{ name }};
+        {{ end -}}
+
         set $upstream "{{ upstream_scheme_host }}";
 
-        # Rewrite strips /repository/<name>/ prefix and prepends the upstream path.
         rewrite ^/repository/{{ name }}/(.*)$ {{ upstream_path }}/$1 break;
 
         proxy_pass $upstream;
 
-        # Required when proxy_pass uses a variable and the upstream is HTTPS:
-        # NGINX won't negotiate SSL automatically in that case.
         proxy_ssl_server_name on;
         proxy_ssl_session_reuse off;
 
@@ -62,7 +114,6 @@ server {
         proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
         proxy_cache_lock on;
 
-        # Only cache GET/HEAD — never cache PUT/DELETE.
         proxy_cache_methods GET HEAD;
 
         {{ if upstream_auth_header != "" -}}
@@ -72,7 +123,6 @@ server {
         proxy_set_header Host $proxy_host;
         proxy_set_header X-Real-IP $remote_addr;
 
-        # Pass ETag and Last-Modified for conditional requests.
         proxy_pass_header ETag;
         proxy_pass_header Last-Modified;
 

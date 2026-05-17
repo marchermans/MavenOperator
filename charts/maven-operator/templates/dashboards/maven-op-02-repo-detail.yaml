@@ -1,0 +1,94 @@
+{{- if .Values.metrics.grafana.dashboards.enabled }}
+{{- $ns := .Values.metrics.grafana.dashboards.namespace | default .Release.Namespace }}
+{{- $label := .Values.metrics.grafana.dashboards.label }}
+{{- $labelVal := .Values.metrics.grafana.dashboards.labelValue }}
+{{- $ds := .Values.metrics.grafana.dashboards.datasourceUid }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maven-op-02-repo-detail
+  namespace: {{ $ns }}
+  labels:
+    {{- include "maven-operator.labels" . | nindent 4 }}
+    {{ $label }}: {{ $labelVal | quote }}
+  annotations:
+    grafana-dashboard-uid: "maven-op-02"
+data:
+  maven-op-02-repo-detail.json: |-
+    {
+      "uid": "maven-op-02",
+      "title": "Maven Repository Detail",
+      "description": "Per-repository drill-down: requests, latency, cache stats, storage.",
+      "tags": ["maven-operator"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace", "type": "query",
+            "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+            "query": "label_values(maven_artifact_requests_total, namespace)",
+            "refresh": 2, "includeAll": true, "current": {}
+          },
+          {
+            "name": "repo", "type": "query",
+            "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+            "query": "label_values(maven_artifact_requests_total{namespace=\"$namespace\"}, repo)",
+            "refresh": 2, "current": {}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1, "title": "Request Rate",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum by (method, status) (rate(maven_artifact_requests_total{repo=\"$repo\"}[5m]))", "legendFormat": "{{ "{{method}} {{status}}" }}" }]
+        },
+        {
+          "id": 2, "title": "Error Rate (4xx+5xx)",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum(rate(maven_artifact_requests_total{repo=\"$repo\",status=~\"[45]..\"}[5m])) / sum(rate(maven_artifact_requests_total{repo=\"$repo\"}[5m]))" }],
+          "fieldConfig": { "defaults": { "unit": "percentunit" } }
+        },
+        {
+          "id": 3, "title": "p95 Request Duration by Asset Type",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, asset_type) (rate(maven_request_duration_seconds_bucket{repo=\"$repo\"}[5m])))", "legendFormat": "p95 {{ "{{asset_type}}" }}" }],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 4, "title": "Bytes Served / sec",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum by (asset_type) (rate(maven_artifact_bytes_total{repo=\"$repo\"}[5m]))", "legendFormat": "{{ "{{asset_type}}" }}" }],
+          "fieldConfig": { "defaults": { "unit": "Bps" } }
+        },
+        {
+          "id": 5, "title": "Cache Hit Rate (proxy repos)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum(rate(maven_cache_hits_total{repo=\"$repo\",cache_status=\"HIT\"}[5m])) / sum(rate(maven_cache_hits_total{repo=\"$repo\"}[5m]))" }],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [{ "value": 0.5, "color": "orange" }] } } }
+        },
+        {
+          "id": 6, "title": "NGINX Active Connections",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "nginx_connections_active{pod=~\"$repo-nginx.*\"}" }]
+        }
+      ],
+      "schemaVersion": 38
+    }
+{{- end }}
+

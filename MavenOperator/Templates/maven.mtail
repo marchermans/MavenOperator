@@ -1,0 +1,47 @@
+# maven.mtail — parse structured JSON Maven access logs
+# Requires mtail v3.0.6+ for the json() decoder.
+# Emits Prometheus metrics for scraping by Prometheus.
+
+# ── Counters ──────────────────────────────────────────────────────────────────
+
+counter maven_artifact_requests_total by repo, method, artifact_group, artifact_id, artifact_version, asset_type, status
+counter maven_artifact_bytes_total    by repo, artifact_group, artifact_id, asset_type
+counter maven_cache_hits_total        by repo, cache_status
+counter maven_upload_bytes_total      by repo, artifact_group, artifact_id
+
+# ── Histograms ────────────────────────────────────────────────────────────────
+
+histogram maven_request_duration_seconds by repo, method, asset_type, status buckets 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10
+
+# ── Parsing rule ──────────────────────────────────────────────────────────────
+
+/^{.*}$/ {
+    json() {
+        /time/             { }
+        /repo/             { $repo = $0 }
+        /method/           { $method = $0 }
+        /artifact_group/   { $group = $0 }
+        /artifact_id/      { $aid = $0 }
+        /artifact_version/ { $version = $0 }
+        /asset_type/       { $atype = $0 }
+        /status/           { $status = $0 }
+        /bytes_sent/       { $bytes = $0 }
+        /request_time/     { $rt = $0 }
+        /cache_status/     { $cache = $0 }
+    }
+
+    maven_artifact_requests_total[$repo][$method][$group][$aid][$version][$atype][$status]++
+
+    maven_artifact_bytes_total[$repo][$group][$aid][$atype] += $bytes
+
+    maven_request_duration_seconds[$repo][$method][$atype][$status] = $rt
+
+    $cache != "-" {
+        maven_cache_hits_total[$repo][$cache]++
+    }
+
+    $method == "PUT" {
+        maven_upload_bytes_total[$repo][$group][$aid] += $bytes
+    }
+}
+

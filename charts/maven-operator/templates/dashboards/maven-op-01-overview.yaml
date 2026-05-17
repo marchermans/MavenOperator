@@ -1,0 +1,90 @@
+{{- if .Values.metrics.grafana.dashboards.enabled }}
+{{- $ns := .Values.metrics.grafana.dashboards.namespace | default .Release.Namespace }}
+{{- $label := .Values.metrics.grafana.dashboards.label }}
+{{- $labelVal := .Values.metrics.grafana.dashboards.labelValue }}
+{{- $ds := .Values.metrics.grafana.dashboards.datasourceUid }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maven-op-01-overview
+  namespace: {{ $ns }}
+  labels:
+    {{- include "maven-operator.labels" . | nindent 4 }}
+    {{ $label }}: {{ $labelVal | quote }}
+  annotations:
+    grafana-dashboard-uid: "maven-op-01"
+data:
+  maven-op-01-overview.json: |-
+    {
+      "uid": "maven-op-01",
+      "title": "Maven Operator Overview",
+      "description": "Health of the Maven Operator control plane: reconcile rate, errors, resource counts.",
+      "tags": ["maven-operator"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+            "query": "label_values(mavenoperator_repository_count, namespace)",
+            "refresh": 2,
+            "includeAll": true,
+            "current": {}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1, "title": "Reconcile Rate by Type",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum by (repo_type) (rate(mavenoperator_reconcile_total[5m]))", "legendFormat": "{{ "{{repo_type}}" }}" }]
+        },
+        {
+          "id": 2, "title": "Reconcile Error Rate",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum by (repo_type) (rate(mavenoperator_reconcile_total{success=\"false\"}[5m])) / sum by (repo_type) (rate(mavenoperator_reconcile_total[5m]))", "legendFormat": "{{ "{{repo_type}}" }}" }],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [{ "value": 0.05, "color": "red" }] } } }
+        },
+        {
+          "id": 3, "title": "p95 Reconcile Duration",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, repo_type) (rate(mavenoperator_reconcile_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{ "{{repo_type}}" }}" }],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 4, "title": "Repositories by Phase",
+          "type": "bargauge",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "mavenoperator_repository_count", "legendFormat": "{{ "{{repo_type}} {{phase}}" }}" }]
+        },
+        {
+          "id": 5, "title": "Failed Repositories",
+          "type": "stat",
+          "gridPos": { "x": 0, "y": 16, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum(mavenoperator_repository_count{phase=\"Failed\"})" }],
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 1, "color": "red" }] }, "color": { "mode": "thresholds" } } }
+        },
+        {
+          "id": 6, "title": "Resources Applied / min",
+          "type": "timeseries",
+          "gridPos": { "x": 6, "y": 16, "w": 18, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "{{ $ds }}" },
+          "targets": [{ "expr": "sum by (resource_kind) (rate(mavenoperator_resource_apply_total[1m]))", "legendFormat": "{{ "{{resource_kind}}" }}" }]
+        }
+      ],
+      "schemaVersion": 38
+    }
+{{- end }}
+

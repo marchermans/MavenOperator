@@ -87,11 +87,20 @@ public sealed class ProxyRepositoryReconciler(
             spec.Auth.Download.Policy,
             spec.Upstream.Url,
             spec.Upstream.CacheTtl,
-            upstreamAuthHeader);
+            upstreamAuthHeader,
+            spec.Metrics);
 
         var configMapName = $"{name}-nginx-cm";
         await resources.EnsureConfigMapAsync(entity, configMapName,
             new Dictionary<string, string> { ["default.conf"] = nginxConfig }, ct);
+
+        // 3b ── mtail ConfigMap (when metrics enabled) ─────────────────────────
+        if (spec.Metrics.Enabled)
+        {
+            var mtailConfig = nginx.RenderMtailConfig();
+            await resources.EnsureConfigMapAsync(entity, $"{name}-mtail-cm",
+                new Dictionary<string, string> { ["maven.mtail"] = mtailConfig }, ct);
+        }
 
         // 4 ── Deployment ──────────────────────────────────────────────────────
         var configHash = ComputeHash(nginxConfig + downloadHtpasswd);
@@ -101,7 +110,8 @@ public sealed class ProxyRepositoryReconciler(
         await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
 
         // 5 ── Service ─────────────────────────────────────────────────────────
-        await resources.EnsureServiceAsync(entity, $"{name}-svc", deployName, ct);
+        var servicePorts = BuildServicePorts(spec.Metrics);
+        await resources.EnsureServiceWithPortsAsync(entity, $"{name}-svc", deployName, servicePorts, ct);
 
         entity.Status.SetCondition("Available", isTrue: true,
             reason: "DeploymentEnsured", message: "NGINX proxy deployment ensured");
@@ -193,106 +203,115 @@ public sealed class ProxyRepositoryReconciler(
 
     private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false)
     {
-        var resourceRequirements = spec.Resources is not null
-            ? new V1ResourceRequirements
-            {
-                Requests = spec.Resources.Requests,
-                Limits   = spec.Resources.Limits,
-            }
+        var res = spec.Resources is not null
+            ? new V1ResourceRequirements { Requests = spec.Resources.Requests, Limits = spec.Resources.Limits }
             : new V1ResourceRequirements
             {
-                Requests = new Dictionary<string, ResourceQuantity>
-                {
-                    ["cpu"]    = new("100m"),
-                    ["memory"] = new("128Mi"),
-                },
-                Limits = new Dictionary<string, ResourceQuantity>
-                {
-                    ["cpu"]    = new("500m"),
-                    ["memory"] = new("512Mi"),
-                },
+                Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("128Mi") },
+                Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("500m"), ["memory"] = new("512Mi") },
             };
 
-        return new V1PodSpec
+        var nginxVolumeMounts = new List<V1VolumeMount>
         {
-            Containers =
-            [
-                new V1Container
-                {
-                    Name            = "nginx",
-                    Image           = NginxImage,
-                    ImagePullPolicy = "IfNotPresent",
-                    Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
-                    Resources       = resourceRequirements,
-                    VolumeMounts    =
-                    [
-                        new V1VolumeMount
-                        {
-                            Name      = "nginx-cache",
-                            MountPath = CachePath,
-                        },
-                        new V1VolumeMount
-                        {
-                            Name             = "nginx-conf",
-                            MountPath        = ConfPath,
-                            ReadOnlyProperty = true,
-                        },
-                        new V1VolumeMount
-                        {
-                            Name             = "download-auth",
-                            MountPath        = AuthPath,
-                            ReadOnlyProperty = true,
-                        },
-                    ],
-                    LivenessProbe = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 5,
-                        PeriodSeconds       = 15,
-                    },
-                    ReadinessProbe = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 3,
-                        PeriodSeconds       = 10,
-                    },
-                },
-            ],
-            Volumes =
-            [
-                // Cache volume: PVC when CachePvcSize is set; emptyDir otherwise.
-                usePvcCache
-                    ? new V1Volume
-                      {
-                          Name = "nginx-cache",
-                          PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource
-                          {
-                              ClaimName = $"{name}-cache-pvc",
-                          },
-                      }
-                    : new V1Volume
-                      {
-                          Name     = "nginx-cache",
-                          EmptyDir = new V1EmptyDirVolumeSource(),
-                      },
-                new V1Volume
-                {
-                    Name      = "nginx-conf",
-                    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" },
-                },
-                new V1Volume
-                {
-                    Name   = "download-auth",
-                    Secret = new V1SecretVolumeSource
-                    {
-                        SecretName = $"{name}-download-htpasswd",
-                        // Provide a default empty htpasswd when policy is Anonymous
-                        // so the volume mount never fails due to a missing secret key.
-                        Optional = true,
-                    },
-                },
-            ],
+            new() { Name = "nginx-cache",    MountPath = CachePath },
+            new() { Name = "nginx-conf",     MountPath = ConfPath,  ReadOnlyProperty = true },
+            new() { Name = "download-auth",  MountPath = AuthPath,  ReadOnlyProperty = true },
         };
+
+        var volumes = new List<V1Volume>
+        {
+            usePvcCache
+                ? new V1Volume { Name = "nginx-cache", PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource { ClaimName = $"{name}-cache-pvc" } }
+                : new V1Volume { Name = "nginx-cache", EmptyDir = new V1EmptyDirVolumeSource() },
+            new() { Name = "nginx-conf",    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" } },
+            new() { Name = "download-auth", Secret    = new V1SecretVolumeSource { SecretName = $"{name}-download-htpasswd", Optional = true } },
+        };
+
+        var containers = new List<V1Container>
+        {
+            new()
+            {
+                Name            = "nginx",
+                Image           = NginxImage,
+                ImagePullPolicy = "IfNotPresent",
+                Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
+                Resources       = res,
+                VolumeMounts    = nginxVolumeMounts,
+                LivenessProbe   = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = 80 }, InitialDelaySeconds = 5,  PeriodSeconds = 15 },
+                ReadinessProbe  = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = 80 }, InitialDelaySeconds = 3,  PeriodSeconds = 10 },
+            },
+        };
+
+        if (spec.Metrics.Enabled)
+        {
+            volumes.Add(new V1Volume { Name = "nginx-logs",   EmptyDir  = new V1EmptyDirVolumeSource() });
+            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
+            nginxVolumeMounts.Add(new V1VolumeMount { Name = "nginx-logs", MountPath = "/var/log/nginx" });
+
+            var noPrivEsc = new V1SecurityContext
+            {
+                AllowPrivilegeEscalation = false,
+                ReadOnlyRootFilesystem   = true,
+                Capabilities             = new V1Capabilities { Drop = ["ALL"] },
+            };
+
+            containers.Add(new V1Container
+            {
+                Name            = "nginx-exporter",
+                Image           = spec.Metrics.NginxExporterImage,
+                ImagePullPolicy = "IfNotPresent",
+                Args            = [$"--nginx.scrape-uri=http://127.0.0.1:{spec.Metrics.StubStatusPort}/stub_status"],
+                Ports           = [new V1ContainerPort { ContainerPort = spec.Metrics.ExporterPort, Name = "nginx-metrics" }],
+                Resources       = new V1ResourceRequirements
+                {
+                    Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("32Mi") },
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("10m"),  ["memory"] = new("16Mi") },
+                },
+                SecurityContext = noPrivEsc,
+            });
+
+            containers.Add(new V1Container
+            {
+                Name            = "mtail",
+                Image           = spec.Metrics.MtailImage,
+                ImagePullPolicy = "IfNotPresent",
+                Args            =
+                [
+                    "--progs=/etc/mtail",
+                    "--logs=/var/log/nginx/access.json",
+                    $"--port={spec.Metrics.MtailPort}",
+                    "--metric_expiry_interval=168h",
+                ],
+                Ports        = [new V1ContainerPort { ContainerPort = spec.Metrics.MtailPort, Name = "mtail-metrics" }],
+                VolumeMounts =
+                [
+                    new V1VolumeMount { Name = "nginx-logs",   MountPath = "/var/log/nginx", ReadOnlyProperty = true },
+                    new V1VolumeMount { Name = "mtail-config", MountPath = "/etc/mtail",      ReadOnlyProperty = true },
+                ],
+                Resources = new V1ResourceRequirements
+                {
+                    Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("64Mi") },
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("20m"),  ["memory"] = new("32Mi") },
+                },
+                SecurityContext = noPrivEsc,
+            });
+        }
+
+        return new V1PodSpec { Containers = containers, Volumes = volumes };
+    }
+
+    private static List<V1ServicePort> BuildServicePorts(MetricsSpec metrics)
+    {
+        var ports = new List<V1ServicePort>
+        {
+            new() { Name = "http", Port = 80, TargetPort = 80 },
+        };
+        if (metrics.Enabled)
+        {
+            ports.Add(new V1ServicePort { Name = "nginx-metrics", Port = metrics.ExporterPort, TargetPort = metrics.ExporterPort });
+            ports.Add(new V1ServicePort { Name = "mtail-metrics",  Port = metrics.MtailPort,    TargetPort = metrics.MtailPort });
+        }
+        return ports;
     }
 
     /// <summary>SHA-256 of the combined config content — used as a pod restart trigger.</summary>

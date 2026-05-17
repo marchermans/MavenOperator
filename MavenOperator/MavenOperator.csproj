@@ -23,6 +23,7 @@
     <!-- Embed NGINX config templates as assembly resources -->
     <ItemGroup>
         <EmbeddedResource Include="Templates\*.scriban" />
+        <EmbeddedResource Include="Templates\*.mtail" />
     </ItemGroup>
     <ItemGroup>
         <Content Include="..\.dockerignore">

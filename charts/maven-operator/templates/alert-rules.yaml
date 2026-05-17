@@ -1,0 +1,189 @@
+{{- if .Values.metrics.grafana.alertRules.enabled }}
+{{- $ns := .Values.metrics.grafana.alertRules.namespace | default .Release.Namespace }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "maven-operator.fullname" . }}-rules
+  namespace: {{ $ns }}
+  labels:
+    {{- include "maven-operator.labels" . | nindent 4 }}
+    {{- with .Values.metrics.grafana.alertRules.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+
+    # ── Recording rules ──────────────────────────────────────────────────────
+    - name: maven.recording
+      interval: 60s
+      rules:
+        # Aggregate to repo + method + asset_type + status (drops artifact coords)
+        - record: maven:repo_requests_total
+          expr: >
+            sum by (repo, method, asset_type, status)
+            (maven_artifact_requests_total)
+
+        # Aggregate to artifact_id level (drops version — medium cardinality)
+        - record: maven:artifact_requests_by_id
+          expr: >
+            sum by (repo, artifact_id, asset_type)
+            (maven_artifact_requests_total)
+
+        # Error rate ratio per repo
+        - record: maven:repo_error_rate5m
+          expr: >
+            sum by (repo) (rate(maven_artifact_requests_total{status=~"[45].."}[5m]))
+            /
+            sum by (repo) (rate(maven_artifact_requests_total[5m]))
+
+        # Cache hit rate per repo (proxy repos)
+        - record: maven:repo_cache_hit_rate30m
+          expr: >
+            sum by (repo) (rate(maven_cache_hits_total{cache_status="HIT"}[30m]))
+            /
+            sum by (repo) (rate(maven_cache_hits_total[30m]))
+
+        # Operator reconcile error ratio per type
+        - record: maven:operator_reconcile_error_rate5m
+          expr: >
+            sum by (repo_type)
+            (rate(mavenoperator_reconcile_total{success="false"}[5m]))
+            /
+            sum by (repo_type) (rate(mavenoperator_reconcile_total[5m]))
+
+    # ── Alert rules ──────────────────────────────────────────────────────────
+    - name: maven.alerts
+      rules:
+
+        # ── Operator ──────────────────────────────────────────────────────────
+
+        - alert: MavenOperatorReconcileErrors
+          expr: maven:operator_reconcile_error_rate5m > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Maven Operator reconcile error rate is high"
+            description: >
+              Reconcile error rate for repo type {{ "{{ $labels.repo_type }}" }} is
+              {{ "{{ $value | humanizePercentage }}" }} over the last 5 minutes.
+              Check operator logs for details.
+            runbook_url: "https://github.com/marchermans/MavenOperator/wiki/runbooks/reconcile-errors"
+
+        - alert: MavenOperatorReconcileLatencyHigh
+          expr: >
+            histogram_quantile(0.95,
+              sum by (le) (rate(mavenoperator_reconcile_duration_seconds_bucket[5m]))
+            ) > 30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Maven Operator reconcile p95 latency is above 30s"
+            description: >
+              p95 reconcile duration is {{ "{{ $value | humanizeDuration }}" }}.
+              This may indicate cluster API server slowness or resource contention.
+
+        - alert: MavenRepositoryNotReady
+          expr: mavenoperator_repository_count{phase="Failed"} > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "One or more MavenRepository resources are in Failed phase"
+            description: >
+              {{ "{{ $value }}" }} repository/repositories of type {{ "{{ $labels.repo_type }}" }}
+              have been in Failed phase for more than 5 minutes.
+              Run: kubectl get mavenrepository -A -o wide
+
+        # ── Data plane ────────────────────────────────────────────────────────
+
+        - alert: MavenNginxDown
+          expr: >
+            kube_deployment_status_replicas_available{deployment=~".*-nginx"}
+            /
+            kube_deployment_spec_replicas{deployment=~".*-nginx"} < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "NGINX deployment {{ "{{ $labels.deployment }}" }} has no available replicas"
+            description: >
+              All pods for {{ "{{ $labels.deployment }}" }} are unavailable.
+              Maven clients will receive connection errors.
+
+        - alert: MavenHighErrorRate
+          expr: maven:repo_error_rate5m > 0.01
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High HTTP error rate on Maven repository {{ "{{ $labels.repo }}" }}"
+            description: >
+              Error rate for {{ "{{ $labels.repo }}" }} is {{ "{{ $value | humanizePercentage }}" }}.
+              4xx errors may indicate auth misconfiguration; 5xx indicate NGINX/storage issues.
+
+        # ── Storage ───────────────────────────────────────────────────────────
+
+        - alert: MavenStorageFull
+          expr: >
+            kubelet_volume_stats_used_bytes
+            / kubelet_volume_stats_capacity_bytes > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Maven repository PVC {{ "{{ $labels.persistentvolumeclaim }}" }} is 85% full"
+            description: >
+              {{ "{{ $labels.persistentvolumeclaim }}" }} is {{ "{{ $value | humanizePercentage }}" }} full.
+              Consider expanding the PVC or cleaning up old artifacts.
+
+        - alert: MavenStorageCritical
+          expr: >
+            kubelet_volume_stats_used_bytes
+            / kubelet_volume_stats_capacity_bytes > 0.95
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Maven repository PVC {{ "{{ $labels.persistentvolumeclaim }}" }} is 95% full"
+            description: >
+              {{ "{{ $labels.persistentvolumeclaim }}" }} is almost full. Maven deploys will
+              fail once the volume is exhausted. Immediate action required.
+
+        # ── Proxy cache ───────────────────────────────────────────────────────
+
+        - alert: MavenProxyCacheHitRateLow
+          expr: maven:repo_cache_hit_rate30m < 0.5
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "Maven proxy repo {{ "{{ $labels.repo }}" }} cache hit rate is below 50%"
+            description: >
+              Cache hit rate for {{ "{{ $labels.repo }}" }} is {{ "{{ $value | humanizePercentage }}" }}
+              over the last 30 minutes. Consider increasing cache size or TTL.
+
+        # ── Virtual proxy ─────────────────────────────────────────────────────
+
+        - alert: MavenVirtualProxyMemberUnhealthy
+          expr: >
+            sum by (repo_name, member_name) (
+              rate(virtual_proxy_member_request_duration_seconds_count{success="false"}[5m])
+            )
+            /
+            sum by (repo_name, member_name) (
+              rate(virtual_proxy_member_request_duration_seconds_count[5m])
+            ) > 0.10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Virtual proxy member {{ "{{ $labels.member_name }}" }} has high error rate"
+            description: >
+              Member {{ "{{ $labels.member_name }}" }} of virtual repo {{ "{{ $labels.repo_name }}" }}
+              has a {{ "{{ $value | humanizePercentage }}" }} error rate over 5 minutes.
+              Artifacts may not resolve correctly through this virtual repository.
+{{- end }}
+

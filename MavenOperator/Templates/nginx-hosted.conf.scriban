@@ -1,6 +1,71 @@
 ## NGINX configuration for a Hosted Maven repository.
 ## Rendered by NginxConfigRenderer using Scriban.
-## Variables: name, download_policy, upload_policy
+## Variables: name, download_policy, upload_policy, metrics_enabled, stub_status_port
+
+# ── Maven coordinate extraction (http context) ─────────────────────────────
+map $uri $maven_repo_{{ name }} {
+    ~^/repository/(?P<repo>[^/]+)/  $repo;
+    default                          "-";
+}
+
+map $uri $maven_artifact_group_{{ name }} {
+    ~^/repository/[^/]+/(?P<g>(?:[^/]+/)+)[^/]+/[^/]+/[^/]+$  $g;
+    default "-";
+}
+
+map $uri $maven_artifact_id_{{ name }} {
+    ~^/repository/[^/]+/(?:[^/]+/)+(?P<a>[^/]+)/[^/]+/[^/]+$  $a;
+    default "-";
+}
+
+map $uri $maven_artifact_version_{{ name }} {
+    ~^/repository/[^/]+/(?:[^/]+/)+[^/]+/(?P<v>[^/]+)/[^/]+$  $v;
+    default "-";
+}
+
+map $uri $maven_asset_type_{{ name }} {
+    ~\.jar$                 jar;
+    ~\.war$                 war;
+    ~\.aar$                 aar;
+    ~\.pom$                 pom;
+    ~maven-metadata\.xml$   metadata;
+    ~\.(sha1|md5|sha256)$   checksum;
+    default                 other;
+}
+
+# ── JSON access log format ──────────────────────────────────────────────────
+log_format maven_json_{{ name }} escape=json
+    '{'
+    '"time":"$time_iso8601",'
+    '"repo":"$maven_repo_{{ name }}",'
+    '"method":"$request_method",'
+    '"path":"$request_uri",'
+    '"artifact_group":"$maven_artifact_group_{{ name }}",'
+    '"artifact_id":"$maven_artifact_id_{{ name }}",'
+    '"artifact_version":"$maven_artifact_version_{{ name }}",'
+    '"asset_type":"$maven_asset_type_{{ name }}",'
+    '"status":$status,'
+    '"bytes_sent":$bytes_sent,'
+    '"request_time":$request_time,'
+    '"cache_status":"-",'
+    '"upstream_rt":"-",'
+    '"remote_addr":"$remote_addr"'
+    '}';
+
+{{ if metrics_enabled -}}
+# ── Internal stub_status (scraped by nginx-prometheus-exporter sidecar) ────
+server {
+    listen {{ stub_status_port }};
+    server_name localhost;
+    allow 127.0.0.1;
+    deny all;
+
+    location /stub_status {
+        stub_status;
+    }
+}
+{{ end -}}
+
 server {
     listen 80;
 
@@ -14,6 +79,10 @@ server {
     location /repository/{{ name }}/ {
         alias /var/maven/repository/;
         autoindex on;
+
+        {{ if metrics_enabled -}}
+        access_log /var/log/nginx/access.json maven_json_{{ name }};
+        {{ end -}}
 
         # WebDAV support — required for mvn deploy (PUT) and Maven tooling
         # Note: dav_ext_methods (PROPFIND) is NOT available in the standard nginx image;
@@ -42,4 +111,3 @@ server {
         }
     }
 }
-

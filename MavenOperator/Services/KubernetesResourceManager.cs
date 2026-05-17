@@ -66,6 +66,14 @@ public interface IKubernetesResourceManager
         int port,
         CancellationToken ct);
 
+    /// <summary>Ensures a ClusterIP Service exists with a custom list of ports.</summary>
+    Task<V1Service> EnsureServiceWithPortsAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string serviceName,
+        string selectorAppLabel,
+        IList<V1ServicePort> ports,
+        CancellationToken ct);
+
     /// <summary>
     /// Ensures a Kubernetes Ingress exists for the given repository.
     /// Creates or updates the ingress based on the provided IngressSpec.
@@ -355,6 +363,15 @@ public sealed class KubernetesResourceManager(
         string selectorAppLabel,
         int port,
         CancellationToken ct)
+        => await EnsureServiceWithPortsAsync(owner, serviceName, selectorAppLabel,
+            [new V1ServicePort { Name = "http", Port = port, TargetPort = port }], ct);
+
+    public async Task<V1Service> EnsureServiceWithPortsAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string serviceName,
+        string selectorAppLabel,
+        IList<V1ServicePort> ports,
+        CancellationToken ct)
     {
         var ns = owner.Metadata.NamespaceProperty!;
 
@@ -372,10 +389,7 @@ public sealed class KubernetesResourceManager(
             {
                 Type     = "ClusterIP",
                 Selector = new Dictionary<string, string> { ["app"] = selectorAppLabel },
-                Ports =
-                [
-                    new V1ServicePort { Name = "http", Port = port, TargetPort = port },
-                ],
+                Ports    = ports,
             },
         };
 
@@ -387,7 +401,6 @@ public sealed class KubernetesResourceManager(
         }
         catch (HttpOperationException ex) when (IsConflict(ex))
         {
-            // Race: already created by another reconcile; fetch and return it.
             logger.LogDebug("Service {Namespace}/{Name} already exists (race) — fetching", ns, serviceName);
             return (await client.GetAsync<V1Service>(serviceName, ns, ct))!;
         }

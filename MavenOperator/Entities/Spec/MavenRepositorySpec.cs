@@ -43,6 +43,12 @@ public sealed class MavenRepositorySpec
     /// Resource requests and limits passed to the NGINX (and proxy) containers.
     /// </summary>
     public V1ResourceRequirements? Resources { get; set; }
+
+    /// <summary>
+    /// Prometheus metrics sidecar configuration. Controls injection of
+    /// nginx-prometheus-exporter and mtail sidecars into NGINX pods.
+    /// </summary>
+    public MetricsSpec Metrics { get; set; } = new();
 }
 
 public enum RepositoryType
