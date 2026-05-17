@@ -67,8 +67,9 @@ public sealed class ProxyRepositoryReconciler(
         if (usePvcCache)
         {
             var cachePvcName = $"{name}-cache-pvc";
-            await resources.EnsurePvcAsync(entity, cachePvcName, spec.Upstream.CachePvcSize!,
-                storageClassName: null, setOwnerReference: true, ct);
+            //Hard code the access mode to ReadWriteMany to support HA mode running.
+            await resources.EnsurePvcAsync(entity, cachePvcName, spec.Upstream.CachePvcSize!, "ReadWriteMany",
+                storageClassName: null, setOwnerReference: true, ct: ct);
             entity.Status.SetCondition("CacheReady", isTrue: true,
                 reason: "PvcCacheEnsured", message: $"PVC cache {cachePvcName} ({spec.Upstream.CachePvcSize}) ensured");
         }

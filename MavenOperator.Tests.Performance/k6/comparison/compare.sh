@@ -6,6 +6,9 @@
 ##   ./compare.sh \
 ##     --maven-operator-url http://maven-op-svc \
 ##     --reposilite-url     http://reposilite-svc:8080 \
+##     --repository         releases \
+##     --enable-upload-scenario false \
+##     --parallel-scenarios false \
 ##     --download-user reader --download-pass secret
 ##
 ## Outputs: summary.json (machine-readable gates result)
@@ -19,24 +22,33 @@ MAVEN_OPERATOR_URL="http://localhost:8081"
 REPOSILITE_URL="http://localhost:8082"
 DOWNLOAD_USER="downloader"
 DOWNLOAD_PASS="password"
+REPOSITORY="releases"
+ENABLE_UPLOAD_SCENARIO="false"
+PARALLEL_SCENARIOS="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --maven-operator-url) MAVEN_OPERATOR_URL="$2"; shift 2;;
     --reposilite-url)     REPOSILITE_URL="$2";     shift 2;;
+    --repository)         REPOSITORY="$2";         shift 2;;
+    --enable-upload-scenario) ENABLE_UPLOAD_SCENARIO="$2"; shift 2;;
+    --parallel-scenarios) PARALLEL_SCENARIOS="$2"; shift 2;;
     --download-user)      DOWNLOAD_USER="$2";       shift 2;;
     --download-pass)      DOWNLOAD_PASS="$2";       shift 2;;
     *) echo "Unknown argument: $1"; exit 1;;
   esac
 done
 
-export MAVEN_OPERATOR_URL REPOSILITE_URL DOWNLOAD_USER DOWNLOAD_PASS
+export MAVEN_OPERATOR_URL REPOSILITE_URL DOWNLOAD_USER DOWNLOAD_PASS REPOSITORY ENABLE_UPLOAD_SCENARIO PARALLEL_SCENARIOS
 
 echo "=== Running MavenOperator benchmark ==="
 k6 run "${SCRIPT_DIR}/maven-operator.js" \
   --out "json=${SCRIPT_DIR}/raw-maven-operator.json" \
   --summary-export "${SCRIPT_DIR}/summary-maven-operator.json" \
   -e MAVEN_OPERATOR_URL="${MAVEN_OPERATOR_URL}" \
+  -e REPOSITORY="${REPOSITORY}" \
+  -e ENABLE_UPLOAD_SCENARIO="${ENABLE_UPLOAD_SCENARIO}" \
+  -e PARALLEL_SCENARIOS="${PARALLEL_SCENARIOS}" \
   -e DOWNLOAD_USER="${DOWNLOAD_USER}" \
   -e DOWNLOAD_PASS="${DOWNLOAD_PASS}" \
   || true   # don't fail yet — compare after both runs
@@ -47,6 +59,9 @@ k6 run "${SCRIPT_DIR}/reposilite.js" \
   --out "json=${SCRIPT_DIR}/raw-reposilite.json" \
   --summary-export "${SCRIPT_DIR}/summary-reposilite.json" \
   -e REPOSILITE_URL="${REPOSILITE_URL}" \
+  -e REPOSITORY="${REPOSITORY}" \
+  -e ENABLE_UPLOAD_SCENARIO="${ENABLE_UPLOAD_SCENARIO}" \
+  -e PARALLEL_SCENARIOS="${PARALLEL_SCENARIOS}" \
   -e DOWNLOAD_USER="${DOWNLOAD_USER}" \
   -e DOWNLOAD_PASS="${DOWNLOAD_PASS}" \
   || true

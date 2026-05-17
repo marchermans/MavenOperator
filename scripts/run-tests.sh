@@ -414,6 +414,7 @@ spec:
   type: Hosted
   storage:
     size: 1Gi
+    accessMode: ReadWriteOnce
     deletionPolicy: Delete
   auth:
     download:

@@ -13,20 +13,21 @@ import { check, sleep } from "k6";
 import { Counter, Trend } from "k6/metrics";
 import {
   REPOSILITE_URL, SMALL_JAR_PATH, LARGE_JAR_PATH, METADATA_PATH,
-  AUTH_HEADER, SCENARIOS, THRESHOLDS, REPOSITORY,
+  AUTH_HEADER, SCENARIOS, THRESHOLDS, REPOSITORY, ENABLE_UPLOAD_SCENARIO, THINK_TIME_SECONDS,
 } from "./setup.js";
 
 export const options = {
   scenarios:  SCENARIOS,
   thresholds: THRESHOLDS,
   tags:       { target: "reposilite" },
+  discardResponseBodies: true,
 };
 
 const uploadCounter = new Counter("reposilite_uploads_total");
 const downloadTrend = new Trend("reposilite_download_ms", true);
 
 function headers() {
-  return { Authorization: AUTH_HEADER };
+  return AUTH_HEADER ? { Authorization: AUTH_HEADER } : {};
 }
 
 // Reposilite serves artifacts at /releases/<path> (no /repository/ prefix)
@@ -39,6 +40,7 @@ export function download_small() {
   const res = http.get(url, { headers: headers() });
   downloadTrend.add(res.timings.duration);
   check(res, { "download-small 200": (r) => r.status === 200 });
+  sleep(THINK_TIME_SECONDS);
 }
 
 export function download_large() {
@@ -46,6 +48,7 @@ export function download_large() {
   const res = http.get(url, { headers: headers() });
   downloadTrend.add(res.timings.duration);
   check(res, { "download-large 200": (r) => r.status === 200 });
+  sleep(THINK_TIME_SECONDS);
 }
 
 export function upload() {
@@ -59,16 +62,18 @@ export function upload() {
   });
   uploadCounter.add(1);
   check(res, { "upload 2xx": (r) => r.status >= 200 && r.status < 300 });
+  sleep(THINK_TIME_SECONDS);
 }
 
 export function metadata() {
   const url = artifactUrl(METADATA_PATH);
   const res = http.get(url, { headers: headers() });
   check(res, { "metadata 200": (r) => r.status === 200 });
+  sleep(THINK_TIME_SECONDS);
 }
 
 export function mixed() {
-  if (Math.random() < 0.8) {
+  if (!ENABLE_UPLOAD_SCENARIO || Math.random() < 0.8) {
     download_small();
   } else {
     upload();

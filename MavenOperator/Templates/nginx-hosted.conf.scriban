@@ -38,6 +38,12 @@ map $uri $maven_asset_type_{{ var_name }} {
     default                 other;
 }
 
+# Long-lived caching for immutable artifacts, but force revalidation for metadata.
+map $uri $maven_cache_control_{{ var_name }} {
+    ~maven-metadata\.xml$     "no-cache, must-revalidate";
+    default                    "public, max-age=31536000, immutable";
+}
+
 # ── JSON access log format ──────────────────────────────────────────────────
 log_format maven_json_{{ var_name }} escape=json
     '{'
@@ -74,6 +80,21 @@ server {
 server {
     listen 80;
 
+    # Throughput tuning for large artifact reads.
+    sendfile on;
+    sendfile_max_chunk 8m;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65s;
+    keepalive_requests 10000;
+    reset_timedout_connection on;
+
+    # Avoid repeated filesystem metadata lookups for hot artifacts.
+    open_file_cache max=10000 inactive=120s;
+    open_file_cache_valid 60s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+
     # Health check endpoint — no auth required
     location = /healthz {
         access_log off;
@@ -84,6 +105,9 @@ server {
     location /repository/{{ name }}/ {
         alias /var/maven/repository/;
         autoindex on;
+
+        etag on;
+        add_header Cache-Control $maven_cache_control_{{ var_name }} always;
 
         {{ if metrics_enabled -}}
         access_log /var/log/nginx/access.json maven_json_{{ var_name }};

@@ -47,8 +47,9 @@ public sealed class HostedRepositoryReconciler(
         var pvcName  = $"{name}-pvc";
         // DeletionPolicy=Retain → no owner reference (PVC survives CRD deletion)
         var setOwner = storage.DeletionPolicy == DeletionPolicy.Delete;
+        var accessMode = storage.AccessMode;
 
-        await resources.EnsurePvcAsync(entity, pvcName, storage.Size,
+        await resources.EnsurePvcAsync(entity, pvcName, storage.Size, accessMode,
             storage.StorageClassName, setOwner, ct);
 
         entity.Status.SetCondition("StorageBound", isTrue: true,

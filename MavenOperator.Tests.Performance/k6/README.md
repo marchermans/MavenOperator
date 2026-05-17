@@ -88,6 +88,77 @@ k6 run k6/concurrent-download-test.js \
 The script provisions a `maven-perf/perf-hosted` Anonymous repository, port-forwards it,
 runs both k6 tests sequentially, and saves JSON summaries to `.benchmarks/`.
 ---
+## Reposilite comparison (quick run)
+Use `comparison/compare.sh` to run the same k6 scenario against MavenOperator and Reposilite,
+then generate a side-by-side summary.
+
+```bash
+cd MavenOperator.Tests.Performance/k6/comparison
+./compare.sh \
+  --maven-operator-url http://localhost:8081 \
+  --reposilite-url http://localhost:8082 \
+  --repository releases \
+  --enable-upload-scenario false \
+  --parallel-scenarios false \
+  --download-user reader \
+  --download-pass secret
+```
+
+Outputs are written in the same directory:
+- `summary-maven-operator.json`
+- `summary-reposilite.json`
+- `summary.json` (gate result + side-by-side metrics)
+
+Exit code semantics:
+- `0` = comparison gates passed
+- `1` = one or more gates failed
+
+The `--repository` value must match both seeded targets (Hosted repo name in MavenOperator
+and path prefix in Reposilite). Default: `releases`.
+
+`--enable-upload-scenario` defaults to `false` (download + metadata comparison only),
+which works with default Reposilite setup out of the box.
+
+`--parallel-scenarios` defaults to `false`, so scenarios run sequentially to avoid
+resource contention skew on local k3d clusters. Set `true` only when intentionally
+stress-testing with compounded concurrency.
+
+Comparison workloads are also paced by default (`THINK_TIME_SECONDS=0.05`) to avoid
+request-storm artifacts (timeouts/resets) from local tunnels. You can tune intensity via env vars,
+for example: `DOWNLOAD_SMALL_VUS`, `DOWNLOAD_LARGE_VUS`, `METADATA_VUS`, `MIXED_VUS`, and
+`THINK_TIME_SECONDS`.
+
+### Fully automated (cluster + deploy + seed + run + cleanup)
+Use the wrapper script when you want a one-command comparison run from scratch:
+
+```bash
+./scripts/run-k6-comparison.sh
+```
+
+What it does automatically:
+- Creates a k3d cluster
+- Loads operator/virtual-proxy/sidecar images and Reposilite image
+- Deploys MavenOperator + Reposilite
+- Creates a Hosted repo (`releases`) and seeds both targets with benchmark artifacts
+- Runs `comparison/compare.sh`
+- Saves outputs under `.benchmarks/k6-comparison-<timestamp>/`
+- Deletes the cluster on exit
+
+Keep the cluster around for debugging:
+
+```bash
+./scripts/run-k6-comparison.sh --keep-cluster
+```
+
+By default, the automated runner uses `benchmark:benchmark` as comparison credentials
+(it configures a temporary Reposilite token with the same pair). Override if needed:
+
+```bash
+DOWNLOAD_USER=reader
+DOWNLOAD_PASS=secret
+./scripts/run-k6-comparison.sh
+```
+---
 ## CI gates (thresholds)
 | Test            | Metric                 | Gate       |
 |-----------------|------------------------|------------|

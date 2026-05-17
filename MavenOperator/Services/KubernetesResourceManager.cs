@@ -17,10 +17,10 @@ namespace MavenOperator.Services;
 public interface IKubernetesResourceManager
 {
     /// <summary>Ensures a PVC exists with the requested size and storage class.</summary>
-    Task<V1PersistentVolumeClaim> EnsurePvcAsync(
-        MavenRepositoryV1Alpha1 owner,
+    Task<V1PersistentVolumeClaim> EnsurePvcAsync(MavenRepositoryV1Alpha1 owner,
         string pvcName,
         string size,
+        string accessMode,
         string? storageClassName,
         bool setOwnerReference,
         CancellationToken ct);
@@ -127,10 +127,10 @@ public sealed class KubernetesResourceManager(
 
     // ── PVC ──────────────────────────────────────────────────────────────────
 
-    public async Task<V1PersistentVolumeClaim> EnsurePvcAsync(
-        MavenRepositoryV1Alpha1 owner,
+    public async Task<V1PersistentVolumeClaim> EnsurePvcAsync(MavenRepositoryV1Alpha1 owner,
         string pvcName,
         string size,
+        string accessMode,
         string? storageClassName,
         bool setOwnerReference,
         CancellationToken ct)
@@ -149,7 +149,7 @@ public sealed class KubernetesResourceManager(
             Metadata = BuildMeta(pvcName, ns, owner, setOwnerReference),
             Spec = new V1PersistentVolumeClaimSpec
             {
-                AccessModes      = ["ReadWriteOnce"],
+                AccessModes      = [accessMode],
                 StorageClassName = storageClassName,
                 Resources        = new V1VolumeResourceRequirements
                 {

@@ -62,7 +62,7 @@ public sealed class Phase4ReconcilerHardeningTests
 
         // emptyDir path: no PVC should be requested
         await resources.DidNotReceive().EnsurePvcAsync(
-            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
 
         // CacheReady condition should be set with EmptyDirCache reason
@@ -88,7 +88,7 @@ public sealed class Phase4ReconcilerHardeningTests
         var entity = BuildProxyEntity("proxy-repo", "ns", cachePvcSize: cacheSize);
 
         resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1PersistentVolumeClaim());
         resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
@@ -112,7 +112,7 @@ public sealed class Phase4ReconcilerHardeningTests
         await resources.Received(1).EnsurePvcAsync(
             entity,
             $"proxy-repo-cache-pvc",
-            cacheSize,
+            cacheSize, Arg.Any<string>(),
             null,
             true /* setOwnerReference */,
             Arg.Any<CancellationToken>());
@@ -196,7 +196,7 @@ public sealed class Phase4ReconcilerHardeningTests
     private static void WireUpHostedMocks(IKubernetesResourceManager resources)
     {
         resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1PersistentVolumeClaim());
         resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
