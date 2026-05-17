@@ -7,3 +7,4 @@ riderModule.iml
 # Temporary files created by the test runner script
 .tmp/
 .benchmarks/
+*.user
