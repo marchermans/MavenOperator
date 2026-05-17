@@ -88,7 +88,8 @@ public sealed class Phase4ReconcilerHardeningTests
         var entity = BuildProxyEntity("proxy-repo", "ns", cachePvcSize: cacheSize);
 
         resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), 
+            Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1PersistentVolumeClaim());
         resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
@@ -112,8 +113,9 @@ public sealed class Phase4ReconcilerHardeningTests
         await resources.Received(1).EnsurePvcAsync(
             entity,
             $"proxy-repo-cache-pvc",
-            cacheSize, Arg.Any<string>(),
-            null,
+            cacheSize,
+            Arg.Is<string>(mode => mode == "ReadWriteMany"),
+            Arg.Is<string?>(sc => sc == null),
             true /* setOwnerReference */,
             Arg.Any<CancellationToken>());
 
