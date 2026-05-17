@@ -11,6 +11,8 @@ env:
   REGISTRY: ghcr.io
   OPERATOR_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-operator
   PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-virtual-proxy
+  AUTH_PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-auth-proxy
+  IMPORT_JOB_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-import-job
   CHART_NAME: maven-operator
 
 jobs:
@@ -141,6 +143,28 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build auth-proxy image (export tarball only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.AuthProxy/Dockerfile
+          push: false
+          tags: maven-auth-proxy:ci
+          outputs: type=docker,dest=/tmp/maven-auth-proxy.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build import-job image (export tarball only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.ImportJob/Dockerfile
+          push: false
+          tags: maven-import-job:ci
+          outputs: type=docker,dest=/tmp/maven-import-job.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Upload image tarballs
         uses: actions/upload-artifact@v4
         with:
@@ -148,6 +172,8 @@ jobs:
           path: |
             /tmp/maven-operator.tar
             /tmp/maven-virtual-proxy.tar
+            /tmp/maven-auth-proxy.tar
+            /tmp/maven-import-job.tar
           retention-days: 1
 
   # ── Integration tests ───────────────────────────────────────────────────────
@@ -188,6 +214,8 @@ jobs:
         run: |
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
+          docker load -i /tmp/maven-auth-proxy.tar
+          docker load -i /tmp/maven-import-job.tar
 
       - name: Run integration tests
         env:
@@ -259,6 +287,8 @@ jobs:
         run: |
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
+          docker load -i /tmp/maven-auth-proxy.tar
+          docker load -i /tmp/maven-import-job.tar
 
       - name: Run E2E tests
         env:
@@ -306,6 +336,8 @@ jobs:
         run: |
           docker load -i /tmp/maven-operator.tar
           docker load -i /tmp/maven-virtual-proxy.tar
+          docker load -i /tmp/maven-auth-proxy.tar
+          docker load -i /tmp/maven-import-job.tar
 
       - name: Run performance smoke tests (xUnit ceilings)
         env:
@@ -362,21 +394,31 @@ jobs:
         run: |
           BASE_OP="${OPERATOR_IMAGE}:${VERSION}"
           BASE_PX="${PROXY_IMAGE}:${VERSION}"
+          BASE_AP="${AUTH_PROXY_IMAGE}:${VERSION}"
+          BASE_IJ="${IMPORT_JOB_IMAGE}:${VERSION}"
 
           if [[ "$IS_RELEASE" == "true" ]]; then
             MAJOR_MINOR="${VERSION%.*}"
             OP_TAGS="${BASE_OP},${OPERATOR_IMAGE}:${MAJOR_MINOR},${OPERATOR_IMAGE}:latest"
             PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${MAJOR_MINOR},${PROXY_IMAGE}:latest"
+            AP_TAGS="${BASE_AP},${AUTH_PROXY_IMAGE}:${MAJOR_MINOR},${AUTH_PROXY_IMAGE}:latest"
+            IJ_TAGS="${BASE_IJ},${IMPORT_JOB_IMAGE}:${MAJOR_MINOR},${IMPORT_JOB_IMAGE}:latest"
           else
             BRANCH_SAFE="$(echo "${GITHUB_REF_NAME}" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
             OP_TAGS="${BASE_OP},${OPERATOR_IMAGE}:${BRANCH_SAFE}"
             PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${BRANCH_SAFE}"
+            AP_TAGS="${BASE_AP},${AUTH_PROXY_IMAGE}:${BRANCH_SAFE}"
+            IJ_TAGS="${BASE_IJ},${IMPORT_JOB_IMAGE}:${BRANCH_SAFE}"
           fi
 
           echo "operator_tags=${OP_TAGS}" >> "$GITHUB_OUTPUT"
           echo "proxy_tags=${PX_TAGS}"    >> "$GITHUB_OUTPUT"
+          echo "auth_proxy_tags=${AP_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "import_job_tags=${IJ_TAGS}" >> "$GITHUB_OUTPUT"
           echo "Operator tags: ${OP_TAGS}"
           echo "Proxy tags:    ${PX_TAGS}"
+          echo "AuthProxy tags:${AP_TAGS}"
+          echo "ImportJob tags:${IJ_TAGS}"
 
       - name: Push operator image to GHCR
         uses: docker/build-push-action@v6
@@ -395,6 +437,26 @@ jobs:
           file: MavenOperator.VirtualProxy/Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.proxy_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push auth-proxy image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.AuthProxy/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.auth_proxy_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push import-job image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.ImportJob/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.import_job_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
