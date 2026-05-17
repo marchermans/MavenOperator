@@ -74,7 +74,12 @@ public sealed class MetricsE2EFixture : IAsyncLifetime
             Spec = new MavenRepositorySpec
             {
                 Type    = RepositoryType.Hosted,
-                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Storage = new StorageSpec
+                {
+                    Size = "1Gi",
+                    AccessMode = "ReadWriteOnce",
+                    DeletionPolicy = DeletionPolicy.Delete
+                },
                 Auth    = new AuthSpec
                 {
                     Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },

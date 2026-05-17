@@ -159,7 +159,12 @@ public sealed class VirtualE2EFixture : IAsyncLifetime
             Spec = new MavenRepositorySpec
             {
                 Type    = RepositoryType.Hosted,
-                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Storage = new StorageSpec
+                {
+                    Size = "1Gi",
+                    AccessMode = "ReadWriteOnce",
+                    DeletionPolicy = DeletionPolicy.Delete
+                },
                 // Disable metrics sidecars in E2E — avoids sidecar image-pull latency.
                 Metrics = new MetricsSpec { Enabled = false },
                 Auth    = new AuthSpec

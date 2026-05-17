@@ -76,7 +76,12 @@ public sealed class E2EFixture : IAsyncLifetime
             Spec = new MavenRepositorySpec
             {
                 Type    = RepositoryType.Hosted,
-                Storage = new StorageSpec { Size = "2Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Storage = new StorageSpec
+                {
+                    Size = "2Gi",
+                    AccessMode = "ReadWriteOnce",
+                    DeletionPolicy = DeletionPolicy.Delete
+                },
                 // Disable metrics sidecars in E2E tests — the nginx-exporter and mtail
                 // images require internet pulls on cold runners which add 60-90 s of
                 // latency and are the primary cause of pod-readiness timeouts.
