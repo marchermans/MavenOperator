@@ -549,6 +549,7 @@ ConfigMaps, and Secrets (except PVCs when `deletionPolicy: Retain`).
 | 3 | ✅ Done | Virtual repository (fan-out + metadata merge) |
 | 4 | ✅ Done | CEL validation, Events, Secret watch, deletionPolicy, Ingress |
 | 5 | ✅ Done | Prometheus metrics, Helm chart, GitHub Actions CI |
-| 6A | 🔜 Planned | **Deep observability** — per-artifact NGINX metrics via `nginx-prometheus-exporter` + `mtail` sidecars; `PodMonitor`; Grafana dashboards; PrometheusRule alert rules |
-| 6B | 🔜 Planned | **Enhanced authentication** — role-based access (reader/deployer/admin); CI platform OIDC trust (GitHub Actions & GitLab CI JWTs, no pre-provisioned secrets); per-artifact-path ACLs |
+| 6A | ✅ Done | **Deep observability** — per-artifact NGINX metrics via `nginx-prometheus-exporter` + `mtail` sidecars; `PodMonitor`; Grafana dashboards; PrometheusRule alert rules |
+| 6B | ✅ Done | **Enhanced authentication** — role-based access (reader/deployer/admin); CI platform OIDC trust (GitHub Actions & GitLab CI JWTs, no pre-provisioned secrets); per-artifact-path ACLs |
+| 7  | 🔜 Planned | **Import & Migration** — `MavenRepositoryImport` CRD; three transfer modes: (A) REST API crawl from Reposilite/JFrog Cloud → direct PVC write (no HTTP round-trip), (B) offline PVC snapshot clone, (C) live Reposilite PVC clone with optional scale-down; RWX storage promoted to default; k6 comparison benchmarks proving MavenOperator matches or beats Reposilite throughput |
 

@@ -129,12 +129,69 @@ MavenOperator.Tests.Performance/   # BenchmarkDotNet benchmarks + k6 scripts
 
 ---
 
+---
+
+## Phase 7 — Import & Migration (see `13-phase7-import-migration.md`)
+
+### Storage baseline change
+- [ ] `spec.storage.accessMode` defaults to `ReadWriteMany`; CEL validates enum; admission warns when StorageClass is RWO-only
+
+### New CRD: `MavenRepositoryImport`
+- [ ] CRD entity + spec/status classes; CEL: exactly one of `source.api`, `source.pvcSnapshot`, `source.pvcLive`
+- [ ] `MavenRepositoryImportController` — validates target repo, resolves transfer mode, launches Job, syncs status, finalizer
+
+### `MavenOperator.ImportJob` console app — three transfer modes
+
+**Mode A — API crawl + direct PVC write**
+- [ ] `ReposiliteApiSource`: recursive BFS via Reposilite REST API; `sinceTimestamp`; Polly retry
+- [ ] `JFrogCloudApiSource`: flat-list Artifactory storage API; Bearer-token auth; group filters
+- [ ] `DirectPvcSink`: write artifact bytes directly to mounted target repo PVC (no HTTP hop)
+- [ ] `HttpSink` (fallback): HTTP PUT when target PVC is RWO and already claimed; operator emits `Warning`
+- [ ] `PvcAccessChecker`: detect RWO conflicts before Job launch; resolve `transferMode: auto`
+
+**Mode B — Snapshot / external PVC clone**
+- [ ] `PvcSnapshotSource`: filesystem walk of mounted source PVC; `reposiliteLayout` path stripping; `mtime` filter
+- [ ] Operator mounts source PVC (RO) + target PVC (RW) into Job; skips `maven-metadata.xml`
+- [ ] Abort with `Failed` + `Error` condition when source PVC is RWO-bound to a running pod
+
+**Mode C — Live Reposilite PVC clone**
+- [ ] Operator stores replica count in `maven.operator.io/pre-import-replicas` annotation; scales Deployment to 0 when `scaleDownDuration > 0s`
+- [ ] Finalizer `maven.operator.io/import-cleanup`: always restores Reposilite replicas on CR deletion
+- [ ] Concurrent mode (`scaleDownDuration: 0s`): requires RWX PVC; `Warning` condition emitted
+
+**Shared**
+- [ ] `MavenLayoutTranslator`: strip `/<repository>/` prefix; normalise separators; remove `.index`/`.cache` dirs
+- [ ] `ProgressReporter`: patch `status.artifactsCopied` on parent CR from inside Job
+- [ ] `ArtifactCrawler`: bounded parallelism (`options.parallelism`); error isolation per artifact
+- [ ] `ChecksumValidator`: SHA-256 post-write verification (optional)
+
+### Performance Comparison — k6
+- [ ] `k6/comparison/maven-operator.js` + `reposilite.js` — 5 scenarios (download-small, download-large, upload, metadata, mixed)
+- [ ] `k6/comparison/compare.sh` — side-by-side `summary.json`
+- [ ] CI `performance-comparison` job: seed via snapshot import, run compare.sh, gate on p50/p95/throughput/error-rate
+- [ ] BenchmarkDotNet `ImportThroughputBenchmark`: `DirectPvcSink` ≥ 3× `HttpSink` throughput
+
+### Tests
+- [ ] Unit: `ReposiliteApiSourceTests`, `JFrogCloudApiSourceTests`, `PvcSnapshotSourceTests`, `DirectPvcSinkTests`, `HttpSinkTests`, `ArtifactCrawlerTests`, `ChecksumValidatorTests`, `MavenLayoutTranslatorTests`, `PvcAccessCheckerTests`
+- [ ] Integration (Mode A): direct-write with RWX PVC; WireMock JFrog; RWO fallback to HTTP
+- [ ] Integration (Mode B): Reposilite layout stripping; raw Maven layout; overwrite-skip; dry-run; RWO conflict abort
+- [ ] Integration (Mode C): scale-down/restore; finalizer scale-up; concurrent RWX
+- [ ] E2E: `ApiImportReposiliteE2ETest`, `SnapshotImportE2ETest`, `LivePvcImportE2ETest`, `DryRunE2ETest`, `PartialMigrationWithFiltersE2ETest`
+
+**Done when:** All three transfer modes successfully migrate a 20-artifact Reposilite corpus
+to an operator-provisioned Hosted repo; `mvn dependency:resolve` resolves every artifact;
+the k6 comparison suite confirms MavenOperator meets or exceeds Reposilite performance gates;
+and `DirectPvcSink` demonstrates ≥ 3× throughput vs `HttpSink` in the BenchmarkDotNet suite.
+
+---
+
 ## Out of Scope for MVP
-- LDAP authentication (planned for Phase 7).
+- LDAP authentication (deferred to Phase 8).
 - `MavenRepositoryBackup` CRD.
 - Web UI / dashboard.
 - Artifact search / indexing.
 - Quota enforcement per repo.
+- Import from Nexus Repository Manager or S3.
 
 > OIDC authentication, role-based access, and per-artifact-path ACLs are now
 > **in-scope for Phase 6**. See `10-phase6-observability.md` and `04-authentication.md`.
