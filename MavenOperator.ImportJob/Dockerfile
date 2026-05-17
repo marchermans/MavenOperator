@@ -12,10 +12,8 @@ RUN dotnet publish MavenOperator.ImportJob/MavenOperator.ImportJob.csproj \
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 WORKDIR /app
 
-# Non-root user for security
-RUN addgroup --gid 10001 appgroup && \
-    adduser  --uid 10001 --gid 10001 --disabled-password --no-create-home appuser
-USER appuser
+# Use the built-in non-root user provided by .NET runtime images.
+USER $APP_UID
 
 COPY --from=build /app/publish .
 
