@@ -29,6 +29,15 @@ serviceAccount:
   annotations: {}
   name: ""
 
+importJob:
+  serviceAccount:
+    # -- Create the ServiceAccount used by MavenRepositoryImport Jobs for in-cluster progress reporting.
+    create: true
+    # -- Annotations to add to the import Job service account.
+    annotations: {}
+    # -- Overrides the import Job ServiceAccount name. Defaults to <release>-maven-operator-import.
+    name: ""
+
 # -- Annotations applied to the operator Pod
 podAnnotations:
   prometheus.io/scrape: "true"

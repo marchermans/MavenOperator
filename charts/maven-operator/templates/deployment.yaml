@@ -41,6 +41,8 @@ spec:
           env:
             - name: DOTNET_ENVIRONMENT
               value: Production
+            - name: IMPORT_JOB_SERVICE_ACCOUNT_NAME
+              value: {{ include "maven-operator.importJobServiceAccountName" . | quote }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

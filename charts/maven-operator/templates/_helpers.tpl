@@ -44,6 +44,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "maven-operator.importJobServiceAccountName" -}}
+{{- $defaultName := printf "%s-import" (include "maven-operator.fullname" .) -}}
+{{- if .Values.importJob.serviceAccount.create }}
+{{- default $defaultName .Values.importJob.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.importJob.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
 {{- define "maven-operator.image" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
 {{- printf "%s:%s" .Values.image.repository $tag }}

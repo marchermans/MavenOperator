@@ -1,6 +1,4 @@
 using k8s.Models;
-using KubeOps.Abstractions.Entities;
-using KubeOps.KubernetesClient;
 using MavenOperator.Entities;
 using MavenOperator.Entities.Spec;
 using MavenOperator.Entities.Status;
@@ -16,6 +14,8 @@ public sealed class ImportJobBuilder(
     private const string TargetMountPath = "/data/target";
     private const string SourceMountPath = "/data/source";
     private const string CredsMountPath  = "/etc/import-credentials";
+    private static string ImportJobServiceAccountName =>
+        Environment.GetEnvironmentVariable("IMPORT_JOB_SERVICE_ACCOUNT_NAME") ?? "maven-operator-import";
 
     public Task<V1Job> BuildJobAsync(
         MavenRepositoryImportV1Alpha1 import,
@@ -26,7 +26,6 @@ public sealed class ImportJobBuilder(
     {
         var importName = import.Metadata.Name!;
         var ns         = import.Metadata.NamespaceProperty!;
-        var spec       = import.Spec;
         var name       = $"{importName}-import-job";
 
         var env     = BuildEnvVars(import, target, transferMode);
@@ -79,7 +78,7 @@ public sealed class ImportJobBuilder(
                         RestartPolicy  = "OnFailure",
                         Containers     = [container],
                         Volumes        = volumes,
-                        ServiceAccountName = "maven-operator-import",
+                        ServiceAccountName = ImportJobServiceAccountName,
                     },
                 },
             },
