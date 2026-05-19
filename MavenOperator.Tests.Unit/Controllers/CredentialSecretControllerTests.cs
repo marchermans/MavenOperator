@@ -203,12 +203,12 @@ public sealed class CredentialSecretControllerTests
                     Download = new AuthPolicySpec
                     {
                         Policy     = downloadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Anonymous,
-                        SecretRefs = downloadSecretRefs?.ToList() ?? [],
+                        Users = (downloadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Reader }).ToList(),
                     },
                     Upload = new AuthPolicySpec
                     {
                         Policy     = uploadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Authenticated,
-                        SecretRefs = uploadSecretRefs?.ToList() ?? [],
+                        Users = (uploadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Deployer }).ToList(),
                     },
                 },
             },

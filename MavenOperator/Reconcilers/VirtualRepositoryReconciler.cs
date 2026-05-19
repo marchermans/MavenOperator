@@ -70,14 +70,14 @@ public sealed class VirtualRepositoryReconciler(
             .ToList();
 
         // 2 ── Download htpasswd Secret ────────────────────────────────────────
-        var downloadHtpasswd = await BuildHtpasswdAsync(entity, spec.Auth.Download, ns, ct);
+        var downloadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Download, ns, ct);
 
         await resources.EnsureSecretAsync(entity, $"{name}-download-htpasswd",
             new Dictionary<string, string> { ["download.htpasswd"] = downloadHtpasswd }, ct);
 
         entity.Status.SetCondition("AuthReady", isTrue: true,
             reason: "HtpasswdGenerated",
-            message: $"{spec.Auth.Download.SecretRefs.Count} download user(s) configured");
+            message: $"{spec.Auth.Download.Users.Count} download user(s) configured");
 
         // 3 ── C# proxy ConfigMap (VirtualRepoConfig JSON) ─────────────────────
         var proxyConfig = new
@@ -152,18 +152,18 @@ public sealed class VirtualRepositoryReconciler(
     // ── Private helpers ──────────────────────────────────────────────────────
 
     private async Task<string> BuildHtpasswdAsync(
-        MavenRepositoryV1Alpha1 _,
         AuthPolicySpec policy,
         string ns,
         CancellationToken ct)
     {
-        if (policy.Policy == AuthPolicy.Anonymous || policy.SecretRefs.Count == 0)
+        if (policy.Policy == AuthPolicy.Anonymous || policy.Users.Count == 0)
             return string.Empty;
 
         var credentials = new List<(string, string)>();
 
-        foreach (var secretRef in policy.SecretRefs)
+        foreach (var user in policy.Users.Where(u => !string.IsNullOrWhiteSpace(u.SecretRef)))
         {
+            var secretRef = user.SecretRef;
             var secret = await k8s.GetAsync<V1Secret>(secretRef, ns, ct)
                 ?? throw new InvalidOperationException(
                     $"Credential Secret '{secretRef}' not found in namespace '{ns}'.");
@@ -173,7 +173,7 @@ public sealed class VirtualRepositoryReconciler(
             credentials.Add((username, password));
         }
 
-        return htpasswd.BuildHtpasswd(credentials);
+        return htpasswd.BuildHtpasswd(credentials.DistinctBy(c => c.Item1));
     }
 
     private static string GetSecretKey(V1Secret secret, string key, string secretName)

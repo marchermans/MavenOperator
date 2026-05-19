@@ -19,6 +19,14 @@ virtualProxy:
     # -- Overrides the image tag; defaults to Chart.appVersion
     tag: ""
 
+authProxy:
+  image:
+    # -- Auth-proxy image repository (without tag)
+    repository: ghcr.io/marchermans/maven-auth-proxy
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag; defaults to Chart.appVersion
+    tag: ""
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

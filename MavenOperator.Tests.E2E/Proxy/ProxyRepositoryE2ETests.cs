@@ -40,6 +40,113 @@ public sealed class ProxyRepositoryE2ETests(ProxyE2EFixture e2e)
             $"Proxy NGINX health check should return 2xx, got {(int)response.StatusCode}");
     }
 
+    [E2EFact]
+    public async Task Operator_WiresAuthProxy_WhenCiTrustOrAclsConfigured()
+    {
+        const string ns = "maven-e2e";
+        var repoName = $"e2e-p6b-{Guid.NewGuid():N}"[..18];
+        var userSecretName = $"{repoName}-user";
+
+        try
+        {
+            await e2e.Client.CreateAsync(new V1Secret
+            {
+                ApiVersion = "v1",
+                Kind = "Secret",
+                Metadata = new V1ObjectMeta
+                {
+                    Name = userSecretName,
+                    NamespaceProperty = ns,
+                    Labels = new Dictionary<string, string> { ["maven.operator.io/credential"] = "true" },
+                },
+                Type = "Opaque",
+                Data = new Dictionary<string, byte[]>
+                {
+                    ["username"] = Encoding.UTF8.GetBytes("phase6b-reader"),
+                    ["password"] = Encoding.UTF8.GetBytes("phase6b-reader-pass"),
+                },
+            }, CancellationToken.None);
+
+            await e2e.Client.CreateAsync(new MavenRepositoryV1Alpha1
+            {
+                ApiVersion = "maven.operator.io/v1alpha1",
+                Kind = "MavenRepository",
+                Metadata = new V1ObjectMeta { Name = repoName, NamespaceProperty = ns },
+                Spec = new MavenRepositorySpec
+                {
+                    Type = RepositoryType.Proxy,
+                    Upstream = new UpstreamSpec { Url = "https://repo1.maven.org/maven2", CacheTtl = "1d" },
+                    Metrics = new MetricsSpec { Enabled = false },
+                    Auth = new AuthSpec
+                    {
+                        Download = new AuthPolicySpec
+                        {
+                            Policy = AuthPolicy.Authenticated,
+                            Users = [new UserRef { SecretRef = userSecretName, Role = UserRole.Reader }],
+                        },
+                        Upload = new AuthPolicySpec
+                        {
+                            Policy = AuthPolicy.Anonymous,
+                            CiTrust =
+                            [
+                                new CiTrustBinding
+                                {
+                                    Platform = CiPlatform.GitHubActions,
+                                    Audience = "maven-operator",
+                                    Role = UserRole.Deployer,
+                                    Claims = new Dictionary<string, string> { ["repository"] = "acme/example-repo" },
+                                },
+                            ],
+                            Acls =
+                            [
+                                new ArtifactAcl
+                                {
+                                    Path = "com/acme/**",
+                                    Roles = [UserRole.Deployer],
+                                },
+                            ],
+                        },
+                    },
+                },
+            }, CancellationToken.None);
+
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            V1Deployment? deployment = null;
+            V1ConfigMap? nginxConfigMap = null;
+            V1ConfigMap? authProxyConfigMap = null;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                deployment = await e2e.Client.GetAsync<V1Deployment>($"{repoName}-nginx", ns, CancellationToken.None);
+                nginxConfigMap = await e2e.Client.GetAsync<V1ConfigMap>($"{repoName}-nginx-cm", ns, CancellationToken.None);
+                authProxyConfigMap = await e2e.Client.GetAsync<V1ConfigMap>($"{repoName}-auth-proxy-cm", ns, CancellationToken.None);
+                if (deployment is not null && nginxConfigMap is not null && authProxyConfigMap is not null) break;
+                await Task.Delay(1000);
+            }
+
+            deployment.ShouldNotBeNull();
+            nginxConfigMap.ShouldNotBeNull();
+            authProxyConfigMap.ShouldNotBeNull();
+
+            deployment!.Spec!.Template!.Spec!.Containers!.Select(c => c.Name)
+                .ShouldContain("maven-auth-proxy");
+
+            var nginxConf = nginxConfigMap!.Data!["default.conf"];
+            nginxConf.ShouldContain("location = /auth/validate");
+            nginxConf.ShouldContain("auth_request /auth/validate");
+
+            var authProxyJson = authProxyConfigMap!.Data!["config.json"];
+            authProxyJson.ShouldContain("\"ciTrust\"");
+            authProxyJson.ShouldContain("\"acls\"");
+            authProxyJson.ShouldContain("com/acme/**");
+        }
+        finally
+        {
+            try { await e2e.Client.DeleteAsync<MavenRepositoryV1Alpha1>(repoName, ns, CancellationToken.None); } catch { }
+            try { await e2e.Client.DeleteAsync<V1Secret>(userSecretName, ns, CancellationToken.None); } catch { }
+        }
+    }
+
     // ── Artifact resolution through proxy ─────────────────────────────────
 
     [E2EFact]

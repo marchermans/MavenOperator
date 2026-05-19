@@ -16,29 +16,10 @@ public sealed class AuthSpec
     /// Only meaningful for Hosted repositories; Virtual always returns 405.
     /// </summary>
     public AuthPolicySpec Upload { get; set; } = new() { Policy = AuthPolicy.Authenticated };
-
-    /// <summary>
-    /// Unified user list with per-user roles. Each entry references a Kubernetes Secret
-    /// holding "username" + "password". Role determines which htpasswd files the user appears in.
-    /// Backward-compatible: <see cref="AuthPolicySpec.SecretRefs"/> in Download/Upload are still supported.
-    /// </summary>
-    public List<UserRef> Users { get; set; } = [];
-
-    /// <summary>
-    /// CI platform OIDC trust bindings. When non-empty, the auth proxy sidecar validates
-    /// Bearer JWTs from GitHub Actions or GitLab CI and maps them to roles.
-    /// </summary>
-    public List<CiTrustBinding> CiTrust { get; set; } = [];
-
-    /// <summary>
-    /// Per-artifact-path ACL rules. Applied after role assignment.
-    /// Ordered by longest-prefix-first when rendering NGINX location blocks.
-    /// </summary>
-    public List<ArtifactAcl> Acls { get; set; } = [];
 }
 
 /// <summary>
-/// A single auth policy (download or upload) with its list of credential Secrets.
+/// A single directional auth policy (download or upload).
 /// </summary>
 public sealed class AuthPolicySpec
 {
@@ -48,12 +29,24 @@ public sealed class AuthPolicySpec
     public AuthPolicy Policy { get; set; } = AuthPolicy.Anonymous;
 
     /// <summary>
-    /// Names of Kubernetes Secrets (in the same namespace), each holding exactly one user's
-    /// "username" and "password". All referenced Secrets are compiled into a single htpasswd file.
-    /// Required when Policy == Authenticated.
-    /// Legacy path — prefer <see cref="AuthSpec.Users"/> with explicit roles.
+    /// Credential users for this direction.
+    /// Each entry references a Kubernetes Secret (same namespace) holding exactly one user:
+    /// "username" + "password".
+    /// All referenced users are compiled into this direction's htpasswd file.
     /// </summary>
-    public List<string> SecretRefs { get; set; } = [];
+    public List<UserRef> Users { get; set; } = [];
+
+    /// <summary>
+    /// CI platform OIDC trust bindings for this direction.
+    /// When non-empty, the auth proxy validates Bearer JWTs and maps them to roles.
+    /// </summary>
+    public List<CiTrustBinding> CiTrust { get; set; } = [];
+
+    /// <summary>
+    /// Direction-specific per-artifact-path ACL rules.
+    /// Applied after role assignment; longest-prefix match wins.
+    /// </summary>
+    public List<ArtifactAcl> Acls { get; set; } = [];
 }
 
 public enum AuthPolicy
@@ -61,7 +54,7 @@ public enum AuthPolicy
     /// <summary>No credentials required.</summary>
     Anonymous,
 
-    /// <summary>HTTP Basic Auth required; credentials come from SecretRefs.</summary>
+    /// <summary>HTTP Basic/Bearer authentication required.</summary>
     Authenticated,
 }
 
@@ -156,12 +149,7 @@ public sealed class ArtifactAcl
     public string Path { get; set; } = "";
 
     /// <summary>
-    /// Roles allowed to download artifacts matching this path.
+    /// Roles allowed for this direction when artifact path matches.
     /// </summary>
     public List<UserRole> Roles { get; set; } = [];
-
-    /// <summary>
-    /// Roles allowed to upload artifacts matching this path.
-    /// </summary>
-    public List<UserRole> UploadRoles { get; set; } = [];
 }

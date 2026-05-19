@@ -92,12 +92,19 @@ public sealed class E2EFixture : IAsyncLifetime
                     {
                         Policy     = AuthPolicy.Authenticated,
                         // Both reader and deployer can download (deployer needs it for maven-metadata)
-                        SecretRefs = [$"{RepositoryName}-download-cred", $"{RepositoryName}-upload-dl-cred"],
+                        Users =
+                        [
+                            new UserRef { SecretRef = $"{RepositoryName}-download-cred", Role = UserRole.Reader },
+                            new UserRef { SecretRef = $"{RepositoryName}-upload-dl-cred", Role = UserRole.Deployer },
+                        ],
                     },
                     Upload = new AuthPolicySpec
                     {
                         Policy     = AuthPolicy.Authenticated,
-                        SecretRefs = [$"{RepositoryName}-upload-cred"],
+                        Users =
+                        [
+                            new UserRef { SecretRef = $"{RepositoryName}-upload-cred", Role = UserRole.Deployer },
+                        ],
                     },
                 },
             },

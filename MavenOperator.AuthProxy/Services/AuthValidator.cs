@@ -20,7 +20,11 @@ public interface IAuthValidator
     /// (success: true, role: "reader"|"deployer"|"admin") on success;
     /// (success: false, role: null) on invalid credentials;
     /// </returns>
-    Task<(bool Success, string? Role)> ValidateAsync(string? authorizationHeader, CancellationToken ct = default);
+    Task<(bool Success, string? Role)> ValidateAsync(
+        string? authorizationHeader,
+        string? originalUri,
+        string? originalMethod,
+        CancellationToken ct = default);
 }
 
 /// <summary>
@@ -48,29 +52,130 @@ public sealed class AuthValidator : IAuthValidator
 
     public async Task<(bool Success, string? Role)> ValidateAsync(
         string? authorizationHeader,
+        string? originalUri,
+        string? originalMethod,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(authorizationHeader))
             return (false, null);
 
+        var isReadDirection = IsReadMethod(originalMethod);
+        var direction = GetDirectionConfig(_config.CurrentValue, isReadDirection);
+
         if (authorizationHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
         {
             var token = authorizationHeader["Bearer ".Length..].Trim();
-            return await ValidateBearerAsync(token, ct);
+            var (success, role) = await ValidateBearerAsync(token, direction.CiTrust, ct);
+            return EnforceAcl(direction.Acls, success, role, originalUri);
         }
 
         if (authorizationHeader.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
         {
             var encoded = authorizationHeader["Basic ".Length..].Trim();
-            return ValidateBasic(encoded);
+            var (success, role) = ValidateBasic(encoded, direction.HtpasswdPath, isReadDirection);
+            return EnforceAcl(direction.Acls, success, role, originalUri);
         }
 
         return (false, null);
     }
 
+    private static AuthDirectionConfig GetDirectionConfig(AuthProxyConfig cfg, bool isReadDirection)
+    {
+        var direction = isReadDirection ? cfg.Download : cfg.Upload;
+        if (string.IsNullOrWhiteSpace(direction.HtpasswdPath))
+        {
+            direction.HtpasswdPath = isReadDirection
+                ? "/etc/maven-auth/download.htpasswd"
+                : "/etc/maven-auth/upload.htpasswd";
+        }
+
+        return direction;
+    }
+
+    private static (bool Success, string? Role) EnforceAcl(
+        List<ArtifactAclConfig> acls,
+        bool success,
+        string? role,
+        string? originalUri)
+    {
+        if (!success || string.IsNullOrWhiteSpace(role))
+            return (success, role);
+
+        if (acls.Count == 0)
+            return (true, role);
+
+        var artifactPath = ExtractArtifactPath(originalUri);
+        if (string.IsNullOrWhiteSpace(artifactPath))
+            return (true, role);
+
+        var acl = acls
+            .OrderByDescending(a => Specificity(a.Path))
+            .FirstOrDefault(a => GlobMatch(a.Path, artifactPath));
+
+        if (acl is null)
+            return (true, role);
+
+        var allowed = acl.Roles
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Select(r => r.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (allowed.Count == 0 || !allowed.Contains(role))
+            return (false, null);
+
+        return (true, role);
+    }
+
+    private static bool IsReadMethod(string? method) =>
+        string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ExtractArtifactPath(string? originalUri)
+    {
+        if (string.IsNullOrWhiteSpace(originalUri))
+            return null;
+
+        var pathOnly = originalUri.Split('?', 2)[0].Trim();
+        var marker = "/repository/";
+        var markerIdx = pathOnly.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIdx < 0)
+            return null;
+
+        var afterMarker = pathOnly[(markerIdx + marker.Length)..];
+        var firstSlash = afterMarker.IndexOf('/');
+        if (firstSlash < 0 || firstSlash == afterMarker.Length - 1)
+            return null;
+
+        return afterMarker[(firstSlash + 1)..];
+    }
+
+    private static int Specificity(string? pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+            return 0;
+
+        return pattern.Count(c => c != '*');
+    }
+
+    private static bool GlobMatch(string pattern, string value)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+            return false;
+
+        var regex = "^" + System.Text.RegularExpressions.Regex.Escape(pattern)
+            .Replace("\\*\\*", ".*")
+            .Replace("\\*", "[^/]*") + "$";
+
+        return System.Text.RegularExpressions.Regex.IsMatch(value, regex, System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    }
+
     // ── Bearer (JWT) validation ─────────────────────────────────────────────
 
-    private async Task<(bool, string?)> ValidateBearerAsync(string rawToken, CancellationToken ct)
+    private async Task<(bool, string?)> ValidateBearerAsync(
+        string rawToken,
+        IReadOnlyList<CiTrustBindingConfig> ciTrust,
+        CancellationToken ct)
     {
         // Decode header/claims without verification first to read iss and kid
         JwtSecurityToken unverified;
@@ -85,10 +190,8 @@ public sealed class AuthValidator : IAuthValidator
         }
 
         var issuer = unverified.Issuer;
-        var config = _config.CurrentValue;
-
         // Find bindings that could match this issuer
-        var matchingBindings = config.CiTrust
+        var matchingBindings = ciTrust
             .Where(b =>
             {
                 try { return string.Equals(b.ResolveIssuerUrl(), issuer, StringComparison.OrdinalIgnoreCase); }
@@ -177,7 +280,7 @@ public sealed class AuthValidator : IAuthValidator
 
     // ── Basic Auth (htpasswd) validation ────────────────────────────────────
 
-    private (bool, string?) ValidateBasic(string encoded)
+    private (bool, string?) ValidateBasic(string encoded, string htpasswdPath, bool isReadDirection)
     {
         string decoded;
         try
@@ -195,14 +298,8 @@ public sealed class AuthValidator : IAuthValidator
         var username = decoded[..colon];
         var password = decoded[(colon + 1)..];
 
-        var config = _config.CurrentValue;
-
-        // Check upload htpasswd first (deployer/admin) then download htpasswd (reader)
-        if (VerifyHtpasswd(username, password, config.UploadHtpasswdPath))
-            return (true, "deployer");
-
-        if (VerifyHtpasswd(username, password, config.DownloadHtpasswdPath))
-            return (true, "reader");
+        if (VerifyHtpasswd(username, password, htpasswdPath))
+            return (true, isReadDirection ? "reader" : "deployer");
 
         return (false, null);
     }

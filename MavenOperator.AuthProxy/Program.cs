@@ -32,9 +32,13 @@ app.MapGet("/auth/validate", async (HttpContext ctx, IAuthValidator validator) =
 {
     // NGINX forwards the original Authorization header as-is
     var authHeader = ctx.Request.Headers.Authorization.ToString();
+    var originalUri = ctx.Request.Headers["X-Original-Uri"].ToString();
+    var originalMethod = ctx.Request.Headers["X-Original-Method"].ToString();
 
     var (success, role) = await validator.ValidateAsync(
         string.IsNullOrWhiteSpace(authHeader) ? null : authHeader,
+        string.IsNullOrWhiteSpace(originalUri) ? null : originalUri,
+        string.IsNullOrWhiteSpace(originalMethod) ? null : originalMethod,
         ctx.RequestAborted);
 
     if (!success)

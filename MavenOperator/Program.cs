@@ -22,6 +22,8 @@ builder.Services
 
 // ── Phase 1 services ─────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IHtpasswdService, HtpasswdService>();
+builder.Services.AddSingleton<IRoleBasedHtpasswdService, RoleBasedHtpasswdService>();
+builder.Services.AddSingleton<IAuthProxyConfigRenderer, AuthProxyConfigRenderer>();
 builder.Services.AddSingleton<INginxConfigRenderer, NginxConfigRenderer>();
 builder.Services.AddSingleton<IKubernetesResourceManager, KubernetesResourceManager>();
 

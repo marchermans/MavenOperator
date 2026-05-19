@@ -52,8 +52,8 @@ public sealed class CredentialSecretController(
         // Filter to repos that reference this Secret in any auth policy or upstream auth.
         var affected = repos
             .Where(r =>
-                r.Spec.Auth.Download.SecretRefs.Contains(secretName) ||
-                r.Spec.Auth.Upload.SecretRefs.Contains(secretName) ||
+                r.Spec.Auth.Download.Users.Any(u => u.SecretRef == secretName) ||
+                r.Spec.Auth.Upload.Users.Any(u => u.SecretRef == secretName) ||
                 r.Spec.Upstream?.Auth?.SecretRef == secretName)
             .ToList();
 

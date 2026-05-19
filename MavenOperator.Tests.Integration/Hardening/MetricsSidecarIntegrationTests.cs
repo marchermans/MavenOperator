@@ -34,6 +34,8 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             Substitute.For<IKubernetesEventService>(),
             NullLogger<HostedRepositoryReconciler>.Instance);
@@ -43,6 +45,8 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             Substitute.For<IKubernetesEventService>(),
             NullLogger<ProxyRepositoryReconciler>.Instance);

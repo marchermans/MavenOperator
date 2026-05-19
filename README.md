@@ -161,14 +161,16 @@ spec:
       policy: Anonymous          # Anonymous | Authenticated
     upload:
       policy: Authenticated
-      secretRefs:
-        - name: deploy-credentials
+      users:
+        - secretRef: deploy-credentials
+          role: Deployer         # Reader | Deployer (default) | Admin
 ```
 
 The operator creates:
 - A PVC `releases-data` (20 Gi)
 - An NGINX deployment `releases-nginx`
 - A Service `releases-svc` on port 80
+- Separate htpasswd Secrets: `releases-download-htpasswd` and `releases-upload-htpasswd`
 
 Artifacts are stored at the path `/repository/releases/<groupId>/<artifactId>/…`.
 
@@ -192,9 +194,10 @@ spec:
     download:
       policy: Anonymous
     upload:
-      policy: Authenticated   # upload == refresh cache on-demand (optional)
-      secretRefs:
-        - name: admin-credentials
+      policy: Authenticated
+      users:                  # upload == refresh cache on-demand (optional)
+        - secretRef: admin-credentials
+          role: Deployer
 ```
 
 ---
@@ -227,7 +230,17 @@ both `releases` and `maven-central-cache`.
 
 ### Authentication
 
-Each `secretRef` points to a Kubernetes `Secret` with exactly two keys:
+Authentication is configured through separate **download** and **upload** policies, allowing
+independent authorization for reads vs. writes. Each policy supports three mechanisms:
+
+1. **Anonymous** — no credentials required
+2. **Authenticated** with credential users (HTTP Basic Auth)
+3. **CI Trust** — OIDC JWT validation from GitHub Actions, GitLab CI, etc.
+4. **Per-artifact ACLs** — enforce role-based path restrictions
+
+#### Credential Users
+
+Each credential user is defined as a Kubernetes `Secret` in the same namespace:
 
 ```bash
 kubectl create secret generic deploy-credentials \
@@ -236,13 +249,64 @@ kubectl create secret generic deploy-credentials \
   --from-literal=password='s3cr3t!'
 ```
 
-The operator compiles all referenced Secrets into a single htpasswd file and
-keeps it updated whenever a credential Secret changes.
+Then reference it by `secretRef`:
 
-Download and upload policies are **independent** and produce separate htpasswd
-Secrets:
-- `<name>-download-htpasswd`
-- `<name>-upload-htpasswd`
+```yaml
+auth:
+  upload:
+    policy: Authenticated
+    users:
+      - secretRef: deploy-credentials
+        role: Deployer              # Reader | Deployer | Admin
+```
+
+The operator compiles all referenced Secrets into directional htpasswd files:
+- `<name>-download-htpasswd` — for download policy
+- `<name>-upload-htpasswd` — for upload policy
+
+#### CI Trust (OIDC)
+
+Grant upload access to CI workflows using GitHub Actions JWTs:
+
+```yaml
+auth:
+  upload:
+    policy: Authenticated
+    ciTrust:
+      - platform: GitHubActions
+        role: Deployer
+        claims:
+          repository: "my-org/*"             # Glob-supported
+          environment: production
+```
+
+#### Per-Artifact ACLs
+
+Restrict access to specific artifact paths by role:
+
+```yaml
+auth:
+  download:
+    policy: Authenticated
+    users:
+      - secretRef: public-reader
+        role: Reader
+    acls:
+      - path: "com/example/internal/**"
+        roles: [Admin, Deployer]             # Reader cannot access
+      - path: "com/example/public/**"
+        roles: [Reader, Deployer, Admin]     # Everyone can access
+  upload:
+    policy: Authenticated
+    users:
+      - secretRef: deployer-creds
+        role: Deployer
+    acls:
+      - path: "**"                           # All paths
+        roles: [Deployer, Admin]             # Only these roles can upload
+```
+
+The operator updates htpasswd files automatically whenever a credential `Secret` changes.
 
 ---
 

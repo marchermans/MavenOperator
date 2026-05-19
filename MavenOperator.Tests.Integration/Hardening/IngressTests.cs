@@ -26,6 +26,8 @@ public sealed class IngressTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             Substitute.For<IKubernetesEventService>(),
             NullLogger<HostedRepositoryReconciler>.Instance);

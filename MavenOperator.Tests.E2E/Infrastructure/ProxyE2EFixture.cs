@@ -72,8 +72,8 @@ public sealed class ProxyE2EFixture : IAsyncLifetime
                 Metrics = new MetricsSpec { Enabled = false },
                 Auth = new AuthSpec
                 {
-                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
-                    Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
                 },
             },
         };

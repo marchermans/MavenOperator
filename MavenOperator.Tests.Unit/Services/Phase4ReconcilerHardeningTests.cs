@@ -29,7 +29,7 @@ public sealed class Phase4ReconcilerHardeningTests
         var nginx = new NginxConfigRenderer();
 
         var reconciler = new ProxyRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), nginx, events,
+            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), nginx, events,
             NullLogger<ProxyRepositoryReconciler>.Instance);
 
         var entity = BuildProxyEntity("proxy-repo", "ns", cachePvcSize: null);
@@ -81,7 +81,7 @@ public sealed class Phase4ReconcilerHardeningTests
         var nginx     = new NginxConfigRenderer();
 
         var reconciler = new ProxyRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), nginx, events,
+            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), nginx, events,
             NullLogger<ProxyRepositoryReconciler>.Instance);
 
         const string cacheSize = "5Gi";
@@ -135,7 +135,7 @@ public sealed class Phase4ReconcilerHardeningTests
         var events    = Substitute.For<IKubernetesEventService>();
 
         var reconciler = new HostedRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), new NginxConfigRenderer(), events,
+            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), new NginxConfigRenderer(), events,
             NullLogger<HostedRepositoryReconciler>.Instance);
 
         var entity = BuildHostedEntity("my-repo", "ns", ingressEnabled: false);

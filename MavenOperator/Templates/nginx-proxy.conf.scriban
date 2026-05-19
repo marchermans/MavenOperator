@@ -1,10 +1,12 @@
 ## NGINX configuration for a Proxy Maven repository.
 ## Rendered by NginxConfigRenderer using Scriban.
-## Variables: name, var_name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header, metrics_enabled, stub_status_port
+## Variables: name, var_name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header, 
+##            metrics_enabled, stub_status_port, download_auth_proxy_enabled
 ##
 ## 'name'     — the Kubernetes resource name, used in URL paths and auth realm strings.
 ##              May contain hyphens (e.g. "my-proxy").
 ## 'var_name' — name sanitised for NGINX identifiers (hyphens → underscores, e.g. "my_proxy").
+## 'download_auth_proxy_enabled' — true if download auth uses proxy (ciTrust/acls).
 ##
 ## The proxy caches upstream responses in an emptyDir (or PVC) volume at /var/cache/nginx/<name>.
 
@@ -110,8 +112,25 @@ server {
         add_header Content-Type text/plain;
     }
 
+    {{ if download_auth_proxy_enabled -}}
+    # Internal auth subrequest endpoint for maven-auth-proxy sidecar.
+    # The proxy inspects X-Original-Method to determine direction (read vs write).
+    location = /auth/validate {
+        internal;
+        proxy_pass http://127.0.0.1:8081/auth/validate;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Original-Uri $request_uri;
+        proxy_set_header X-Original-Method $request_method;
+    }
+    {{ end -}}
+
     location /repository/{{ name }}/ {
-        {{ if download_policy == "Authenticated" -}}
+        {{ if download_auth_proxy_enabled -}}
+        auth_request /auth/validate;
+        auth_request_set $maven_auth_role $upstream_http_x_auth_role;
+        {{ else if download_policy == "Authenticated" -}}
         auth_basic "Maven Proxy - {{ name }}";
         auth_basic_user_file /etc/nginx/auth/download.htpasswd;
         {{ end -}}

@@ -58,3 +58,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
 
+{{- define "maven-operator.authProxyImage" -}}
+{{- $tag := .Values.authProxy.image.tag | default .Chart.AppVersion }}
+{{- printf "%s:%s" .Values.authProxy.image.repository $tag }}
+{{- end }}
+

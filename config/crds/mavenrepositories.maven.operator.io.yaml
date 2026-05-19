@@ -37,12 +37,12 @@ spec:
                 # Virtual must have at least one member
                 - rule: "self.type != 'Virtual' || (has(self.virtual) && self.virtual.members.size() > 0)"
                   message: "spec.virtual.members must be non-empty when type is Virtual"
-                # Authenticated download requires secretRefs
-                - rule: "self.auth.download.policy != 'Authenticated' || self.auth.download.secretRefs.size() > 0"
-                  message: "spec.auth.download.secretRefs must be non-empty when download policy is Authenticated"
-                # Authenticated upload requires secretRefs
-                - rule: "self.auth.upload.policy != 'Authenticated' || self.auth.upload.secretRefs.size() > 0"
-                  message: "spec.auth.upload.secretRefs must be non-empty when upload policy is Authenticated"
+                # Authenticated download requires at least one basic user or CI trust binding.
+                - rule: "self.auth.download.policy != 'Authenticated' || self.auth.download.users.size() > 0 || self.auth.download.ciTrust.size() > 0"
+                  message: "spec.auth.download requires users or ciTrust when policy is Authenticated"
+                # Authenticated upload requires at least one basic user or CI trust binding.
+                - rule: "self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
+                  message: "spec.auth.upload requires users or ciTrust when policy is Authenticated"
               properties:
                 type:
                   type: string
@@ -108,10 +108,52 @@ spec:
                           type: string
                           enum: [Anonymous, Authenticated]
                           default: Anonymous
-                        secretRefs:
+                        users:
                           type: array
                           items:
-                            type: string
+                            type: object
+                            properties:
+                              secretRef:
+                                type: string
+                              role:
+                                type: string
+                                enum: [Reader, Deployer, Admin]
+                                default: Deployer
+                        ciTrust:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              platform:
+                                type: string
+                                enum: [GitHubActions, GitLab]
+                                default: GitHubActions
+                              issuerUrl:
+                                type: string
+                                nullable: true
+                              audience:
+                                type: string
+                                nullable: true
+                              role:
+                                type: string
+                                enum: [Reader, Deployer, Admin]
+                                default: Deployer
+                              claims:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                        acls:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              path:
+                                type: string
+                              roles:
+                                type: array
+                                items:
+                                  type: string
+                                  enum: [Reader, Deployer, Admin]
                     upload:
                       type: object
                       properties:
@@ -119,10 +161,52 @@ spec:
                           type: string
                           enum: [Anonymous, Authenticated]
                           default: Authenticated
-                        secretRefs:
+                        users:
                           type: array
                           items:
-                            type: string
+                            type: object
+                            properties:
+                              secretRef:
+                                type: string
+                              role:
+                                type: string
+                                enum: [Reader, Deployer, Admin]
+                                default: Deployer
+                        ciTrust:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              platform:
+                                type: string
+                                enum: [GitHubActions, GitLab]
+                                default: GitHubActions
+                              issuerUrl:
+                                type: string
+                                nullable: true
+                              audience:
+                                type: string
+                                nullable: true
+                              role:
+                                type: string
+                                enum: [Reader, Deployer, Admin]
+                                default: Deployer
+                              claims:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                        acls:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              path:
+                                type: string
+                              roles:
+                                type: array
+                                items:
+                                  type: string
+                                  enum: [Reader, Deployer, Admin]
                 ingress:
                   type: object
                   properties:

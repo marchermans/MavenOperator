@@ -26,12 +26,18 @@ public sealed class ProxyRepositoryReconciler(
     IKubernetesClient k8s,
     IKubernetesResourceManager resources,
     IHtpasswdService htpasswd,
+    IRoleBasedHtpasswdService roleBasedHtpasswd,
+    IAuthProxyConfigRenderer authProxyConfig,
     INginxConfigRenderer nginx,
     IKubernetesEventService events,
     ILogger<ProxyRepositoryReconciler> logger)
     : IProxyRepositoryReconciler
 {
+    private static string AuthProxyImage =>
+        Environment.GetEnvironmentVariable("AUTH_PROXY_IMAGE") ?? "maven-auth-proxy:dev";
     private const string NginxImage = "nginx:1.27-alpine";
+    private const string AuthProxyMountPath = "/etc/maven-auth";
+    private const int AuthProxyPort = 8081;
     private const string AuthPath   = "/etc/nginx/auth";
     private const string ConfPath   = "/etc/nginx/conf.d";
     private const string CachePath  = "/var/cache/nginx";
@@ -51,16 +57,22 @@ public sealed class ProxyRepositoryReconciler(
         await events.PublishAsync(entity, "Provisioning", $"Reconciling Proxy repository '{name}' → {spec.Upstream.Url}", ct: ct);
 
         // 1 ── Download htpasswd Secret ────────────────────────────────────────
-        var downloadHtpasswd = await BuildHtpasswdAsync(entity, spec.Auth.Download, ns, ct);
+        var downloadUsesAuthProxy = spec.Auth.Download.CiTrust.Count > 0
+                                    || spec.Auth.Download.Acls.Count > 0;
+        var uploadUsesAuthProxy = spec.Auth.Upload.CiTrust.Count > 0
+                                  || spec.Auth.Upload.Acls.Count > 0;
+        var useAuthProxy = downloadUsesAuthProxy || uploadUsesAuthProxy;
+        var downloadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Download, ns, ct);
+        var uploadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct);
 
         await resources.EnsureSecretAsync(entity, $"{name}-download-htpasswd",
             new Dictionary<string, string> { ["download.htpasswd"] = downloadHtpasswd }, ct);
 
         entity.Status.SetCondition("AuthReady", isTrue: true,
             reason: "HtpasswdGenerated",
-            message: $"{spec.Auth.Download.SecretRefs.Count} download user(s) configured");
+            message: $"{spec.Auth.Download.Users.Count} download user(s) configured");
         await events.PublishAsync(entity, "AuthUpdated",
-            $"htpasswd rebuilt: {spec.Auth.Download.SecretRefs.Count} download user(s)", ct: ct);
+            $"htpasswd rebuilt: {spec.Auth.Download.Users.Count} download user(s)", ct: ct);
 
         // 1b ── Persistent proxy cache PVC (optional) ──────────────────────────
         var usePvcCache = !string.IsNullOrWhiteSpace(spec.Upstream.CachePvcSize);
@@ -89,11 +101,24 @@ public sealed class ProxyRepositoryReconciler(
             spec.Upstream.Url,
             spec.Upstream.CacheTtl,
             upstreamAuthHeader,
-            spec.Metrics);
+            spec.Metrics,
+            downloadUsesAuthProxy);
 
         var configMapName = $"{name}-nginx-cm";
         await resources.EnsureConfigMapAsync(entity, configMapName,
             new Dictionary<string, string> { ["default.conf"] = nginxConfig }, ct);
+
+        string authProxyConfigJson = string.Empty;
+        if (useAuthProxy)
+        {
+            authProxyConfigJson = authProxyConfig.Render(spec.Auth);
+            await resources.EnsureConfigMapAsync(entity, $"{name}-auth-proxy-cm",
+                new Dictionary<string, string> { ["config.json"] = authProxyConfigJson }, ct);
+            await resources.EnsureSecretAsync(entity, $"{name}-upload-htpasswd",
+                new Dictionary<string, string> { ["upload.htpasswd"] = uploadHtpasswd }, ct);
+            entity.Status.SetCondition("AuthProxyReady", isTrue: true,
+                reason: "ConfigRendered", message: "Auth proxy config rendered from auth.download/auth.upload directional rules");
+        }
 
         // 3b ── mtail ConfigMap (when metrics enabled) ─────────────────────────
         if (spec.Metrics.Enabled)
@@ -104,9 +129,9 @@ public sealed class ProxyRepositoryReconciler(
         }
 
         // 4 ── Deployment ──────────────────────────────────────────────────────
-        var configHash = ComputeHash(nginxConfig + downloadHtpasswd);
+        var configHash = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswd + authProxyConfigJson);
         var deployName = $"{name}-nginx";
-        var podSpec    = BuildPodSpec(name, spec, usePvcCache);
+        var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy);
 
         await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
 
@@ -164,18 +189,18 @@ public sealed class ProxyRepositoryReconciler(
     /// a combined htpasswd file content. Returns empty string for Anonymous policy.
     /// </summary>
     private async Task<string> BuildHtpasswdAsync(
-        MavenRepositoryV1Alpha1 entity,
         AuthPolicySpec policy,
         string ns,
         CancellationToken ct)
     {
-        if (policy.Policy == AuthPolicy.Anonymous || policy.SecretRefs.Count == 0)
+        if (policy.Policy == AuthPolicy.Anonymous || policy.Users.Count == 0)
             return string.Empty;
 
         var credentials = new List<(string, string)>();
 
-        foreach (var secretRef in policy.SecretRefs)
+        foreach (var user in policy.Users.Where(u => !string.IsNullOrWhiteSpace(u.SecretRef)))
         {
+            var secretRef = user.SecretRef;
             var secret = await k8s.GetAsync<V1Secret>(secretRef, ns, ct)
                 ?? throw new InvalidOperationException(
                     $"Credential Secret '{secretRef}' not found in namespace '{ns}'.");
@@ -185,7 +210,7 @@ public sealed class ProxyRepositoryReconciler(
             credentials.Add((username, password));
         }
 
-        return htpasswd.BuildHtpasswd(credentials);
+        return htpasswd.BuildHtpasswd(credentials.DistinctBy(c => c.Item1));
     }
 
     /// <summary>
@@ -221,7 +246,7 @@ public sealed class ProxyRepositoryReconciler(
             $"Credential Secret '{secretName}' is missing the required key '{key}'.");
     }
 
-    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false)
+    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useAuthProxy = false)
     {
         var res = spec.Resources is not null
             ? new V1ResourceRequirements { Requests = spec.Resources.Requests, Limits = spec.Resources.Limits }
@@ -246,6 +271,12 @@ public sealed class ProxyRepositoryReconciler(
             new() { Name = "nginx-conf",    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" } },
             new() { Name = "download-auth", Secret    = new V1SecretVolumeSource { SecretName = $"{name}-download-htpasswd", Optional = true } },
         };
+
+        if (useAuthProxy)
+        {
+            volumes.Add(new V1Volume { Name = "upload-auth", Secret = new V1SecretVolumeSource { SecretName = $"{name}-upload-htpasswd", Optional = true } });
+            volumes.Add(new V1Volume { Name = "auth-proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-auth-proxy-cm" } });
+        }
 
         var containers = new List<V1Container>
         {
@@ -323,6 +354,30 @@ public sealed class ProxyRepositoryReconciler(
                     Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("20m"),  ["memory"] = new("32Mi") },
                 },
                 SecurityContext = noPrivEscWritableRoot,
+            });
+        }
+
+        if (useAuthProxy)
+        {
+            containers.Add(new V1Container
+            {
+                Name = "maven-auth-proxy",
+                Image = AuthProxyImage,
+                ImagePullPolicy = "IfNotPresent",
+                Ports = [new V1ContainerPort { ContainerPort = AuthProxyPort, Name = "auth-proxy" }],
+                VolumeMounts =
+                [
+                    new V1VolumeMount { Name = "auth-proxy-config", MountPath = $"{AuthProxyMountPath}/config.json", SubPath = "config.json", ReadOnlyProperty = true },
+                    new V1VolumeMount { Name = "download-auth", MountPath = $"{AuthProxyMountPath}/download.htpasswd", SubPath = "download.htpasswd", ReadOnlyProperty = true },
+                    new V1VolumeMount { Name = "upload-auth", MountPath = $"{AuthProxyMountPath}/upload.htpasswd", SubPath = "upload.htpasswd", ReadOnlyProperty = true },
+                ],
+                LivenessProbe = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = AuthProxyPort }, InitialDelaySeconds = 5, PeriodSeconds = 15 },
+                ReadinessProbe = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = AuthProxyPort }, InitialDelaySeconds = 3, PeriodSeconds = 10 },
+                Resources = new V1ResourceRequirements
+                {
+                    Limits = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("25m"), ["memory"] = new("64Mi") },
+                },
             });
         }
 

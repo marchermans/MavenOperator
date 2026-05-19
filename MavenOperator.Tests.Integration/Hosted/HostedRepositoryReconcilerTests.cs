@@ -30,6 +30,8 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<HostedRepositoryReconciler>.Instance
@@ -61,8 +63,16 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
                 Storage = new() { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
                 Auth    = new()
                 {
-                    Download = new() { Policy = download, SecretRefs = downloadRefs ?? [] },
-                    Upload   = new() { Policy = upload,   SecretRefs = uploadRefs   ?? [] },
+                    Download = new()
+                    {
+                        Policy = download,
+                        Users = (downloadRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Reader }).ToList(),
+                    },
+                    Upload   = new()
+                    {
+                        Policy = upload,
+                        Users = (uploadRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Deployer }).ToList(),
+                    },
                 },
             },
         };
@@ -206,7 +216,11 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
         var hash1 = dep1!.Spec!.Template!.Metadata!.Annotations!["maven.operator.io/config-hash"];
 
         // Switch download policy — config changes → hash must change → rolling restart triggered
-        entity.Spec.Auth.Download = new() { Policy = AuthPolicy.Authenticated, SecretRefs = [$"{name}-u"] };
+        entity.Spec.Auth.Download = new()
+        {
+            Policy = AuthPolicy.Authenticated,
+            Users = [new UserRef { SecretRef = $"{name}-u", Role = UserRole.Reader }],
+        };
         await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
 
         var dep2 = await cluster.Client.GetAsync<V1Deployment>(

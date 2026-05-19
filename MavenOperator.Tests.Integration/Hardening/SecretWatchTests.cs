@@ -38,6 +38,8 @@ public sealed class SecretWatchTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             Substitute.For<IKubernetesEventService>(),
             NullLogger<HostedRepositoryReconciler>.Instance);
@@ -72,8 +74,8 @@ public sealed class SecretWatchTests(ClusterFixture cluster)
                         Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
                         Upload   = new AuthPolicySpec
                         {
-                            Policy     = AuthPolicy.Authenticated,
-                            SecretRefs = [secretName],
+                            Policy = AuthPolicy.Authenticated,
+                            Users = [new UserRef { SecretRef = secretName, Role = UserRole.Deployer }],
                         },
                     },
                 },

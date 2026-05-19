@@ -43,6 +43,8 @@ spec:
               value: Production
             - name: IMPORT_JOB_SERVICE_ACCOUNT_NAME
               value: {{ include "maven-operator.importJobServiceAccountName" . | quote }}
+            - name: AUTH_PROXY_IMAGE
+              value: {{ include "maven-operator.authProxyImage" . | quote }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

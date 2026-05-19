@@ -25,6 +25,13 @@ namespace MavenOperator.Tests.E2E.Virtual;
 [Trait("Category", "E2E")]
 public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
 {
+    private static readonly HttpStatusCode[] TransientGatewayStatuses =
+    [
+        HttpStatusCode.BadGateway,
+        HttpStatusCode.ServiceUnavailable,
+        HttpStatusCode.GatewayTimeout,
+    ];
+
     // ── Operator provisioning ─────────────────────────────────────────────────
 
     [E2EFact]
@@ -47,7 +54,7 @@ public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
         await e2e.UploadArtifactAsync(e2e.Member1Name, path, content);
 
         // Should resolve through the Virtual
-        var resp = await e2e.HttpClient.GetAsync(
+        var resp = await GetWithGatewayRetryAsync(
             $"/repository/{e2e.VirtualName}/{path}");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK,
             $"Artifact from member1 should be reachable via Virtual (got {(int)resp.StatusCode})");
@@ -64,7 +71,7 @@ public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
 
         await e2e.UploadArtifactAsync(e2e.Member2Name, path, content);
 
-        var resp = await e2e.HttpClient.GetAsync(
+        var resp = await GetWithGatewayRetryAsync(
             $"/repository/{e2e.VirtualName}/{path}");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK,
             $"Artifact from member2 should be reachable via Virtual (got {(int)resp.StatusCode})");
@@ -73,7 +80,7 @@ public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
     [E2EFact]
     public async Task Http_Get_NonExistentArtifact_Returns404()
     {
-        var resp = await e2e.HttpClient.GetAsync(
+        var resp = await GetWithGatewayRetryAsync(
             $"/repository/{e2e.VirtualName}/io/does/not/exist/9.9.9/x-9.9.9.jar");
 
         resp.StatusCode.ShouldBe(HttpStatusCode.NotFound,
@@ -137,7 +144,7 @@ public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
             Encoding.UTF8.GetBytes(BuildMetadata(group.Replace('/', '.'), artifact, ["2.0"])));
 
         // Fetch merged metadata through the Virtual
-        var resp = await e2e.HttpClient.GetAsync(
+        var resp = await GetWithGatewayRetryAsync(
             $"/repository/{e2e.VirtualName}/{group}/{artifact}/maven-metadata.xml");
 
         resp.StatusCode.ShouldBe(HttpStatusCode.OK,
@@ -185,6 +192,24 @@ public sealed class VirtualRepositoryE2ETests(VirtualE2EFixture e2e)
               </versioning>
             </metadata>
             """;
+    }
+
+    private async Task<HttpResponseMessage> GetWithGatewayRetryAsync(string requestUri)
+    {
+        HttpResponseMessage? lastResponse = null;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            lastResponse?.Dispose();
+            lastResponse = await e2e.HttpClient.GetAsync(requestUri);
+            if (!TransientGatewayStatuses.Contains(lastResponse.StatusCode))
+                return lastResponse;
+
+            await Task.Delay(1000);
+        }
+
+        return lastResponse ?? await e2e.HttpClient.GetAsync(requestUri);
     }
 }
 

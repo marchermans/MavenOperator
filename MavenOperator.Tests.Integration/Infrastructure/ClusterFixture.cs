@@ -86,12 +86,12 @@ public sealed class ClusterFixture : IAsyncLifetime
                     Download = new AuthPolicySpec
                     {
                         Policy     = downloadPolicy,
-                        SecretRefs = downloadSecretRefs?.ToList() ?? [],
+                        Users = (downloadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Reader }).ToList(),
                     },
                     Upload = new AuthPolicySpec
                     {
                         Policy     = uploadPolicy,
-                        SecretRefs = uploadSecretRefs?.ToList() ?? [],
+                        Users = (uploadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Deployer }).ToList(),
                     },
                 },
             },

@@ -11,7 +11,7 @@ public interface INginxConfigRenderer
 {
     /// <summary>Renders the NGINX configuration for a Hosted repository.</summary>
     string RenderHosted(string name, AuthPolicy downloadPolicy, AuthPolicy uploadPolicy,
-        MetricsSpec? metrics = null);
+        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false);
 
     /// <summary>Renders the NGINX configuration for a Proxy repository.</summary>
     string RenderProxy(
@@ -20,7 +20,8 @@ public interface INginxConfigRenderer
         string upstreamUrl,
         string cacheTtl,
         string upstreamAuthHeader,
-        MetricsSpec? metrics = null);
+        MetricsSpec? metrics = null,
+        bool downloadAuthProxyEnabled = false);
 
     /// <summary>
     /// Returns the content of the mtail program ConfigMap (maven.mtail).
@@ -62,7 +63,7 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
 
     /// <inheritdoc/>
     public string RenderHosted(string name, AuthPolicy downloadPolicy, AuthPolicy uploadPolicy,
-        MetricsSpec? metrics = null)
+        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         metrics ??= new MetricsSpec();
@@ -78,6 +79,8 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             upload_policy    = uploadPolicy.ToString(),
             metrics_enabled  = metrics.Enabled,
             stub_status_port = metrics.StubStatusPort,
+            download_auth_proxy_enabled = downloadAuthProxyEnabled,
+            upload_auth_proxy_enabled = uploadAuthProxyEnabled,
         }, member => member.Name);
     }
 
@@ -88,7 +91,8 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         string upstreamUrl,
         string cacheTtl,
         string upstreamAuthHeader,
-        MetricsSpec? metrics = null)
+        MetricsSpec? metrics = null,
+        bool downloadAuthProxyEnabled = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamUrl);
@@ -109,6 +113,7 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             upstream_auth_header  = upstreamAuthHeader ?? string.Empty,
             metrics_enabled       = metrics.Enabled,
             stub_status_port      = metrics.StubStatusPort,
+            download_auth_proxy_enabled = downloadAuthProxyEnabled,
         }, member => member.Name);
     }
 

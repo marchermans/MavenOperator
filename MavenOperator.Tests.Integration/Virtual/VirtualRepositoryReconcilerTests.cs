@@ -58,7 +58,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
                     Download = new()
                     {
                         Policy     = downloadPolicy,
-                        SecretRefs = downloadSecrets ?? [],
+                        Users = (downloadSecrets ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Reader }).ToList(),
                     },
                     Upload = new() { Policy = AuthPolicy.Anonymous },
                 },

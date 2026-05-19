@@ -7,19 +7,47 @@ namespace MavenOperator.AuthProxy;
 public sealed class AuthProxyConfig
 {
     /// <summary>
+    /// Directional download auth settings.
+    /// </summary>
+    public AuthDirectionConfig Download { get; set; } = new();
+
+    /// <summary>
+    /// Directional upload auth settings.
+    /// </summary>
+    public AuthDirectionConfig Upload { get; set; } = new();
+}
+
+/// <summary>
+/// Direction-specific auth-proxy settings.
+/// </summary>
+public sealed class AuthDirectionConfig
+{
+    /// <summary>
     /// CI platform OIDC trust bindings. Evaluated in order; first match wins.
     /// </summary>
     public List<CiTrustBindingConfig> CiTrust { get; set; } = [];
 
     /// <summary>
-    /// Path to the download htpasswd file for Basic Auth validation.
+    /// Optional per-artifact ACLs evaluated after role resolution.
     /// </summary>
-    public string DownloadHtpasswdPath { get; set; } = "/etc/maven-auth/download.htpasswd";
+    public List<ArtifactAclConfig> Acls { get; set; } = [];
 
     /// <summary>
-    /// Path to the upload htpasswd file for Basic Auth validation.
+    /// Path to the direction htpasswd file for Basic Auth validation.
     /// </summary>
-    public string UploadHtpasswdPath { get; set; } = "/etc/maven-auth/upload.htpasswd";
+    public string HtpasswdPath { get; set; } = "";
+}
+
+/// <summary>
+/// ACL rule in auth-proxy config form.
+/// </summary>
+public sealed class ArtifactAclConfig
+{
+    /// <summary>Path glob (e.g. "com/example/**").</summary>
+    public string Path { get; set; } = "";
+
+    /// <summary>Roles allowed for this direction.</summary>
+    public List<string> Roles { get; set; } = [];
 }
 
 /// <summary>

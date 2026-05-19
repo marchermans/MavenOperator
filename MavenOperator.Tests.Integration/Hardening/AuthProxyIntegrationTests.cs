@@ -70,7 +70,7 @@ public sealed class AuthProxyIntegrationTests : IClassFixture<AuthProxyIntegrati
                 // Configure ciTrust bindings that the tests rely on
                 services.Configure<AuthProxyConfig>(config =>
                 {
-                    config.CiTrust = new List<CiTrustBindingConfig>
+                    var bindings = new List<CiTrustBindingConfig>
                     {
                         // GitHub Actions binding
                         new()
@@ -94,6 +94,9 @@ public sealed class AuthProxyIntegrationTests : IClassFixture<AuthProxyIntegrati
                             },
                         },
                     };
+
+                    config.Download.CiTrust = bindings;
+                    config.Upload.CiTrust = bindings;
                 });
             });
         }
@@ -343,8 +346,8 @@ public sealed class AuthProxyIntegrationTests : IClassFixture<AuthProxyIntegrati
 
                         services.Configure<AuthProxyConfig>(cfg =>
                         {
-                            cfg.DownloadHtpasswdPath = htpasswdPath;
-                            cfg.UploadHtpasswdPath   = htpasswdPath; // same file for simplicity
+                            cfg.Download.HtpasswdPath = htpasswdPath;
+                            cfg.Upload.HtpasswdPath   = htpasswdPath; // same file for simplicity
                         });
                     });
                 });

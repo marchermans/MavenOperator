@@ -30,6 +30,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
             new NginxConfigRenderer(),
             NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<ProxyRepositoryReconciler>.Instance
@@ -61,8 +63,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
                 },
                 Auth = new()
                 {
-                    Download = new() { Policy = download, SecretRefs = [] },
-                    Upload   = new() { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
+                    Download = new() { Policy = download },
+                    Upload   = new() { Policy = AuthPolicy.Anonymous },
                 },
             },
         };
@@ -176,8 +178,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
         var name = $"int-px-{Guid.NewGuid().ToString("N")[..6]}";
         await cluster.CreateCredentialSecretAsync($"{name}-dl", "reader", "r3adS3cr3t!");
 
-        // Create entity directly with secretRef — CEL validation (Phase 4) requires
-        // secretRefs to be non-empty when policy is Authenticated.
+        // Create entity directly with download.users — CEL validation (Phase 4) requires
+        // users or ciTrust when policy is Authenticated.
         var fullEntity = new MavenRepositoryV1Alpha1
         {
             ApiVersion = "maven.operator.io/v1alpha1",
@@ -189,8 +191,12 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
                 Upstream = new() { Url = "https://repo1.maven.org/maven2", CacheTtl = "1d" },
                 Auth     = new()
                 {
-                    Download = new() { Policy = AuthPolicy.Authenticated, SecretRefs = [$"{name}-dl"] },
-                    Upload   = new() { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
+                    Download = new()
+                    {
+                        Policy = AuthPolicy.Authenticated,
+                        Users = [new UserRef { SecretRef = $"{name}-dl", Role = UserRole.Reader }],
+                    },
+                    Upload   = new() { Policy = AuthPolicy.Anonymous },
                 },
             },
         };
@@ -225,8 +231,12 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
                 Upstream = new() { Url = "https://repo1.maven.org/maven2", CacheTtl = "1d" },
                 Auth     = new()
                 {
-                    Download = new() { Policy = AuthPolicy.Authenticated, SecretRefs = [$"{name}-dl"] },
-                    Upload   = new() { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
+                    Download = new()
+                    {
+                        Policy = AuthPolicy.Authenticated,
+                        Users = [new UserRef { SecretRef = $"{name}-dl", Role = UserRole.Reader }],
+                    },
+                    Upload   = new() { Policy = AuthPolicy.Anonymous },
                 },
             },
         };
@@ -267,8 +277,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
                 },
                 Auth = new()
                 {
-                    Download = new() { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
-                    Upload   = new() { Policy = AuthPolicy.Anonymous, SecretRefs = [] },
+                    Download = new() { Policy = AuthPolicy.Anonymous },
+                    Upload   = new() { Policy = AuthPolicy.Anonymous },
                 },
             },
         };
