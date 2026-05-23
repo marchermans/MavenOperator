@@ -40,9 +40,9 @@ spec:
                 # Authenticated download requires at least one basic user or CI trust binding.
                 - rule: "self.auth.download.policy != 'Authenticated' || self.auth.download.users.size() > 0 || self.auth.download.ciTrust.size() > 0"
                   message: "spec.auth.download requires users or ciTrust when policy is Authenticated"
-                # Authenticated upload requires at least one basic user or CI trust binding.
-                - rule: "self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
-                  message: "spec.auth.upload requires users or ciTrust when policy is Authenticated"
+                # Hosted repos only: authenticated upload requires at least one basic user or CI trust binding.
+                - rule: "self.type != 'Hosted' || self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
+                  message: "spec.auth.upload requires users or ciTrust when type is Hosted and policy is Authenticated"
               properties:
                 type:
                   type: string
