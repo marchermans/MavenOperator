@@ -35,9 +35,9 @@ public sealed class VirtualRepositoryReconciler(
     : IVirtualRepositoryReconciler
 {
     // The virtual proxy is now a separate binary (MavenOperator.VirtualProxy).
-    // Read its image from the VIRTUAL_PROXY_IMAGE env-var; falls back to "maven-virtual-proxy:dev".
+    // Read its image from the VIRTUAL_PROXY_IMAGE env-var; falls back to the published GHCR image.
     private static string ProxyImage =>
-        Environment.GetEnvironmentVariable("VIRTUAL_PROXY_IMAGE") ?? "maven-virtual-proxy:dev";
+        Environment.GetEnvironmentVariable("VIRTUAL_PROXY_IMAGE") ?? "ghcr.io/marchermans/maven-virtual-proxy:0.3.0-pre.1";
     private const string NginxImage     = "nginx:1.27-alpine";
     private const string AuthPath       = "/etc/nginx/auth";
     private const string ConfPath       = "/etc/nginx/conf.d";

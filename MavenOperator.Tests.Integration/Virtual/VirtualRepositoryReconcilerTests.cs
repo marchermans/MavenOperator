@@ -143,7 +143,10 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
             $"{name}-proxy", cluster.Namespace, CancellationToken.None);
 
         deploy.ShouldNotBeNull();
-        deploy.Spec!.Template.Spec!.Containers!.ShouldContain(c => c.Name == "proxy");
+        var proxy = deploy.Spec!.Template.Spec!.Containers!.Single(c => c.Name == "proxy");
+        var expectedImage = Environment.GetEnvironmentVariable("VIRTUAL_PROXY_IMAGE")
+            ?? "ghcr.io/marchermans/maven-virtual-proxy:0.3.0-pre.1";
+        proxy.Image.ShouldBe(expectedImage);
     }
 
     [IntegrationFact]

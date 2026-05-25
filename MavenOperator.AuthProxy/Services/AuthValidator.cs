@@ -56,11 +56,13 @@ public sealed class AuthValidator : IAuthValidator
         string? originalMethod,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(authorizationHeader))
-            return (false, null);
-
         var isReadDirection = IsReadMethod(originalMethod);
         var direction = GetDirectionConfig(_config.CurrentValue, isReadDirection);
+
+        if (string.IsNullOrWhiteSpace(authorizationHeader))
+            return AllowsAnonymous(direction)
+                ? (true, null)
+                : (false, null);
 
         if (authorizationHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
         {
@@ -91,6 +93,11 @@ public sealed class AuthValidator : IAuthValidator
 
         return direction;
     }
+
+    private static bool AllowsAnonymous(AuthDirectionConfig direction) =>
+        string.Equals(direction.Policy, "Anonymous", StringComparison.OrdinalIgnoreCase)
+        && direction.CiTrust.Count == 0
+        && direction.Acls.Count == 0;
 
     private static (bool Success, string? Role) EnforceAcl(
         List<ArtifactAclConfig> acls,

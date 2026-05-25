@@ -23,6 +23,11 @@ public sealed class AuthProxyConfig
 public sealed class AuthDirectionConfig
 {
     /// <summary>
+    /// Authentication policy for this direction: "Anonymous" or "Authenticated".
+    /// </summary>
+    public string Policy { get; set; } = "Authenticated";
+
+    /// <summary>
     /// CI platform OIDC trust bindings. Evaluated in order; first match wins.
     /// </summary>
     public List<CiTrustBindingConfig> CiTrust { get; set; } = [];

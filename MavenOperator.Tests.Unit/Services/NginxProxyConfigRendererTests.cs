@@ -119,6 +119,20 @@ public sealed class NginxProxyConfigRendererTests
         result.ShouldContain("/healthz");
     }
 
+    [Fact]
+    public void RenderProxy_DownloadAuthProxy_UsesCorrectSidecarPort()
+    {
+        var result = _sut.RenderProxy(
+            "central",
+            AuthPolicy.Authenticated,
+            UpstreamUrl,
+            "1d",
+            "",
+            downloadAuthProxyEnabled: true);
+
+        result.ShouldContain("proxy_pass http://127.0.0.1:8080/auth/validate;");
+    }
+
     // ── Validation ────────────────────────────────────────────────────────────
 
     [Fact]

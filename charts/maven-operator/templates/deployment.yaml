@@ -45,6 +45,8 @@ spec:
               value: {{ include "maven-operator.importJobServiceAccountName" . | quote }}
             - name: AUTH_PROXY_IMAGE
               value: {{ include "maven-operator.authProxyImage" . | quote }}
+            - name: VIRTUAL_PROXY_IMAGE
+              value: {{ include "maven-operator.virtualProxyImage" . | quote }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

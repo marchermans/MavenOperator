@@ -46,6 +46,22 @@ public sealed class NginxConfigRendererTests
         var result = _sut.RenderHosted("my-repo", AuthPolicy.Anonymous, AuthPolicy.Authenticated);
         result.ShouldContain("/healthz");
     }
+
+    [Fact]
+    public void RenderHosted_UploadAuthProxy_UsesLocationScopedAuthRequest_AndCorrectSidecarPort()
+    {
+        var result = _sut.RenderHosted(
+            "my-repo",
+            AuthPolicy.Anonymous,
+            AuthPolicy.Authenticated,
+            downloadAuthProxyEnabled: false,
+            uploadAuthProxyEnabled: true);
+
+        result.ShouldContain("proxy_pass http://127.0.0.1:8080/auth/validate;");
+        result.ShouldContain("auth_request /auth/validate;");
+        result.ShouldContain("# Enforced by the outer auth_request using X-Original-Method.");
+        result.ShouldNotContain("limit_except GET HEAD OPTIONS {\n            # Upload authentication enforcement\n            auth_request /auth/validate;");
+    }
     [Theory]
     [InlineData("releases")]
     [InlineData("my-snapshots")]

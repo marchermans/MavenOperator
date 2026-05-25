@@ -34,7 +34,7 @@ public sealed class HostedRepositoryReconciler(
         Environment.GetEnvironmentVariable("AUTH_PROXY_IMAGE") ?? "maven-auth-proxy:dev";
     private const string NginxImage     = "nginx:1.27-alpine";
     private const string AuthProxyMountPath = "/etc/maven-auth";
-    private const int AuthProxyPort = 8081;
+    private const int AuthProxyPort = 8080;
     private const string RepositoryPath = "/var/maven/repository";
     private const string AuthPath       = "/etc/nginx/auth";
     private const string ConfPath       = "/etc/nginx/conf.d";

@@ -25,12 +25,14 @@ public sealed class AuthProxyConfigRenderer : IAuthProxyConfigRenderer
         {
             download = new
             {
+                policy = auth.Download.Policy.ToString(),
                 ciTrust = auth.Download.CiTrust.Select(ToCiTrustBinding).ToArray(),
                 acls = auth.Download.Acls.Select(ToAcl).ToArray(),
                 htpasswdPath = "/etc/maven-auth/download.htpasswd",
             },
             upload = new
             {
+                policy = auth.Upload.Policy.ToString(),
                 ciTrust = auth.Upload.CiTrust.Select(ToCiTrustBinding).ToArray(),
                 acls = auth.Upload.Acls.Select(ToAcl).ToArray(),
                 htpasswdPath = "/etc/maven-auth/upload.htpasswd",

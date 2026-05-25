@@ -26,6 +26,7 @@ public sealed class Phase6BAuthWiringTests
             uploadAuthProxyEnabled: false);
 
         result.ShouldContain("location = /auth/validate");
+        result.ShouldContain("proxy_pass http://127.0.0.1:8080/auth/validate;");
         result.ShouldContain("auth_request /auth/validate");
         result.ShouldNotContain("auth_basic \"Maven - releases\"");
     }
@@ -43,11 +44,9 @@ public sealed class Phase6BAuthWiringTests
             downloadAuthProxyEnabled: false,
             uploadAuthProxyEnabled: true);
 
-        // Download location should NOT use auth_request (download is anonymous)
         result.ShouldContain("location /repository/releases/");
-        // But upload (inside limit_except) should use auth_request
-        result.ShouldContain("limit_except GET HEAD OPTIONS");
-        // The /auth/validate endpoint must exist
+        result.ShouldContain("auth_request /auth/validate");
+        result.ShouldContain("# Enforced by the outer auth_request using X-Original-Method.");
         result.ShouldContain("location = /auth/validate");
     }
 
@@ -68,8 +67,9 @@ public sealed class Phase6BAuthWiringTests
         var validateCount = result.Split("location = /auth/validate").Length - 1;
         validateCount.ShouldBe(1, "Should only define /auth/validate once");
         
-        // Both download and upload should use auth_request
-        result.Split("auth_request /auth/validate").Length.ShouldBeGreaterThanOrEqualTo(3); // before and after plus once in endpoint
+        // The repository location should use a single location-scoped auth_request.
+        var authRequestCount = result.Split("auth_request /auth/validate").Length - 1;
+        authRequestCount.ShouldBe(1);
     }
 
     [Fact]

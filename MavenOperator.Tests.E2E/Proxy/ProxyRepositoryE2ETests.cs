@@ -83,10 +83,6 @@ public sealed class ProxyRepositoryE2ETests(ProxyE2EFixture e2e)
                         {
                             Policy = AuthPolicy.Authenticated,
                             Users = [new UserRef { SecretRef = userSecretName, Role = UserRole.Reader }],
-                        },
-                        Upload = new AuthPolicySpec
-                        {
-                            Policy = AuthPolicy.Anonymous,
                             CiTrust =
                             [
                                 new CiTrustBinding
@@ -105,6 +101,10 @@ public sealed class ProxyRepositoryE2ETests(ProxyE2EFixture e2e)
                                     Roles = [UserRole.Deployer],
                                 },
                             ],
+                        },
+                        Upload = new AuthPolicySpec
+                        {
+                            Policy = AuthPolicy.Anonymous,
                         },
                     },
                 },

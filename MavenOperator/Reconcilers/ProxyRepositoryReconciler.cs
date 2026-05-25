@@ -37,7 +37,7 @@ public sealed class ProxyRepositoryReconciler(
         Environment.GetEnvironmentVariable("AUTH_PROXY_IMAGE") ?? "maven-auth-proxy:dev";
     private const string NginxImage = "nginx:1.27-alpine";
     private const string AuthProxyMountPath = "/etc/maven-auth";
-    private const int AuthProxyPort = 8081;
+    private const int AuthProxyPort = 8080;
     private const string AuthPath   = "/etc/nginx/auth";
     private const string ConfPath   = "/etc/nginx/conf.d";
     private const string CachePath  = "/var/cache/nginx";
@@ -59,11 +59,8 @@ public sealed class ProxyRepositoryReconciler(
         // 1 ── Download htpasswd Secret ────────────────────────────────────────
         var downloadUsesAuthProxy = spec.Auth.Download.CiTrust.Count > 0
                                     || spec.Auth.Download.Acls.Count > 0;
-        var uploadUsesAuthProxy = spec.Auth.Upload.CiTrust.Count > 0
-                                  || spec.Auth.Upload.Acls.Count > 0;
-        var useAuthProxy = downloadUsesAuthProxy || uploadUsesAuthProxy;
+        var useAuthProxy = downloadUsesAuthProxy;
         var downloadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Download, ns, ct);
-        var uploadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct);
 
         await resources.EnsureSecretAsync(entity, $"{name}-download-htpasswd",
             new Dictionary<string, string> { ["download.htpasswd"] = downloadHtpasswd }, ct);
@@ -114,8 +111,6 @@ public sealed class ProxyRepositoryReconciler(
             authProxyConfigJson = authProxyConfig.Render(spec.Auth);
             await resources.EnsureConfigMapAsync(entity, $"{name}-auth-proxy-cm",
                 new Dictionary<string, string> { ["config.json"] = authProxyConfigJson }, ct);
-            await resources.EnsureSecretAsync(entity, $"{name}-upload-htpasswd",
-                new Dictionary<string, string> { ["upload.htpasswd"] = uploadHtpasswd }, ct);
             entity.Status.SetCondition("AuthProxyReady", isTrue: true,
                 reason: "ConfigRendered", message: "Auth proxy config rendered from auth.download/auth.upload directional rules");
         }
@@ -129,7 +124,7 @@ public sealed class ProxyRepositoryReconciler(
         }
 
         // 4 ── Deployment ──────────────────────────────────────────────────────
-        var configHash = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswd + authProxyConfigJson);
+        var configHash = ComputeHash(nginxConfig + downloadHtpasswd + authProxyConfigJson);
         var deployName = $"{name}-nginx";
         var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy);
 
