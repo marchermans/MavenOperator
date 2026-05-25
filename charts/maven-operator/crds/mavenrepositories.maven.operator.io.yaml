@@ -44,10 +44,10 @@ spec:
                 - rule: "self.type != 'Hosted' || self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
                   message: "spec.auth.upload requires users or ciTrust when type is Hosted and policy is Authenticated"
                 # Cannot enable both ingress and gateway simultaneously.
-                - rule: "!(self.ingress.enabled && self.gateway.enabled)"
+                - rule: "!((has(self.ingress) && self.ingress.enabled) && (has(self.gateway) && self.gateway.enabled))"
                   message: "spec.ingress and spec.gateway cannot both be enabled at the same time"
                 # Gateway enabled → gatewayRef.name must be present.
-                - rule: "!self.gateway.enabled || self.gateway.gatewayRef.name != ''"
+                - rule: "!(has(self.gateway) && self.gateway.enabled) || (has(self.gateway.gatewayRef) && self.gateway.gatewayRef.name != '')"
                   message: "spec.gateway.gatewayRef.name is required when gateway is enabled"
               properties:
                 type:
