@@ -43,6 +43,11 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
+  # Kubernetes Gateway API resources managed by repository reconcilers
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   # Prometheus Operator resources created when metrics are enabled
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["podmonitors"]

@@ -35,9 +35,16 @@ public sealed class MavenRepositorySpec
     public AuthSpec Auth { get; set; } = new();
 
     /// <summary>
-    /// Optional Ingress exposure configuration.
+    /// Optional classic Ingress exposure configuration.
+    /// Cannot be combined with <see cref="Gateway"/>.
     /// </summary>
     public IngressSpec Ingress { get; set; } = new();
+
+    /// <summary>
+    /// Optional Kubernetes Gateway API exposure configuration (creates an <c>HTTPRoute</c>).
+    /// Cannot be combined with <see cref="Ingress"/>.
+    /// </summary>
+    public GatewaySpec Gateway { get; set; } = new();
 
     /// <summary>
     /// Resource requests and limits passed to the NGINX (and proxy) containers.

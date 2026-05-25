@@ -43,6 +43,12 @@ spec:
                 # Hosted repos only: authenticated upload requires at least one basic user or CI trust binding.
                 - rule: "self.type != 'Hosted' || self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
                   message: "spec.auth.upload requires users or ciTrust when type is Hosted and policy is Authenticated"
+                # Cannot enable both ingress and gateway simultaneously.
+                - rule: "!(self.ingress.enabled && self.gateway.enabled)"
+                  message: "spec.ingress and spec.gateway cannot both be enabled at the same time"
+                # Gateway enabled → gatewayRef.name must be present.
+                - rule: "!self.gateway.enabled || self.gateway.gatewayRef.name != ''"
+                  message: "spec.gateway.gatewayRef.name is required when gateway is enabled"
               properties:
                 type:
                   type: string
@@ -222,6 +228,54 @@ spec:
                     tlsSecretRef:
                       type: string
                       nullable: true
+                gateway:
+                  type: object
+                  description: >
+                    Kubernetes Gateway API exposure. When enabled the operator creates an
+                    HTTPRoute pointing at an existing Gateway. Mutually exclusive with
+                    spec.ingress.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    gatewayRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Name of the existing Gateway resource. Required when gateway.enabled is true.
+                        namespace:
+                          type: string
+                          nullable: true
+                          description: Namespace of the Gateway resource. Defaults to the MavenRepository namespace.
+                        sectionName:
+                          type: string
+                          nullable: true
+                          description: Listener section name inside the Gateway. Omit to attach to all compatible listeners.
+                    hostname:
+                      type: string
+                      nullable: true
+                      description: Hostname added to the HTTPRoute hostnames list.
+                    path:
+                      type: string
+                      nullable: true
+                      description: >
+                        URL path prefix for the HTTPRoute match rule.
+                        Defaults to /repository/{name} when absent.
+                    tlsSecretRef:
+                      type: string
+                      nullable: true
+                      description: Name of a TLS Secret in the same namespace for HTTPS status URL construction.
+                    routeLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Extra labels merged into the generated HTTPRoute metadata.
+                    routeAnnotations:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Extra annotations merged into the generated HTTPRoute metadata.
                 metrics:
                   type: object
                   properties:

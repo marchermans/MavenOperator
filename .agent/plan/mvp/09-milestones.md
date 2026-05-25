@@ -196,3 +196,32 @@ and `DirectPvcSink` demonstrates ≥ 3× throughput vs `HttpSink` in the Benchma
 > OIDC authentication, role-based access, and per-artifact-path ACLs are now
 > **in-scope for Phase 6**. See `10-phase6-observability.md` and `04-authentication.md`.
 
+---
+
+## Phase 8 — Gateway API Support (see `14-gateway-api.md`)
+
+### CRD changes
+- [ ] `GatewaySpec.cs` + `GatewayRefSpec.cs` entity classes added to `Entities/Spec/`
+- [ ] `spec.gateway` sub-spec added to `MavenRepositorySpec`
+- [ ] CRD YAML updated in `config/crds/` and `charts/maven-operator/crds/` (in sync)
+- [ ] CEL rules: mutual exclusion with `spec.ingress`, required `gatewayRef.name`
+
+### Reconciler
+- [ ] `GatewayRouteReconciler` service — idempotently creates/patches/deletes `HTTPRoute`
+- [ ] Hosted / Proxy: single `PathPrefix` rule → `<name>-svc`
+- [ ] Virtual: additional rule matching PUT / DELETE returning 405 (gateway-native or NGINX fallback)
+- [ ] Owner reference set on `HTTPRoute`
+- [ ] `status.url` derived from hostname + path (https:// when `tlsSecretRef` set)
+
+### RBAC
+- [ ] `httproutes` verb rules added to Helm `ClusterRole` in `rbac.yaml`
+
+### Tests
+- [ ] Unit: `GatewayRouteReconciler` — enabled/disabled, each repo type, missing `gatewayRef.name`
+- [ ] Integration: operator creates / updates / deletes `HTTPRoute` on CRD changes
+- [ ] E2E: Maven client resolves artifacts through a Gateway API HTTPRoute
+
+**Done when:** A `MavenRepository` with `spec.gateway.enabled: true` causes the operator
+to create a valid `HTTPRoute`; toggling back to `spec.gateway.enabled: false` deletes it;
+and `mvn dependency:resolve` succeeds through the route in a k3d cluster with Envoy Gateway.
+

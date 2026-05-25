@@ -48,12 +48,24 @@ spec:
       secretRefs:
         - deployer-credentials   # one or more users — all are compiled into htpasswd
         - admin-credentials
-  # ── Exposure ─────────────────────────────────────────────────────
+  # ── Exposure (choose one; not both) ──────────────────────
   ingress:
     enabled: true
     host: maven.example.com
     path: /repository/my-releases
     tlsSecretRef: maven-tls      # optional
+  # — OR — Kubernetes Gateway API
+  gateway:
+    enabled: false               # mutually exclusive with ingress.enabled
+    gatewayRef:
+      name: prod-gateway         # required when enabled
+      namespace: infra-gateways # optional; defaults to MavenRepository namespace
+      sectionName: https         # optional
+    hostname: maven.example.com  # optional
+    path: /repository/my-releases # optional; defaults to /repository/{name}
+    tlsSecretRef: maven-tls      # optional; controls http vs https in status.url
+    routeLabels: {}              # extra labels on the HTTPRoute
+    routeAnnotations: {}         # extra annotations on the HTTPRoute
   # ── Resource limits ───────────────────────────────────────────────
   resources:
     requests:
@@ -127,3 +139,5 @@ All child resources: `<MavenRepository.name>-<suffix>` with owner references set
 | `-nginx-cm` | ConfigMap | NGINX configuration |
 | `-download-htpasswd` | Secret | Compiled htpasswd for download users (operator managed) |
 | `-upload-htpasswd` | Secret | Compiled htpasswd for upload users (operator managed) |
+| `-ing` | Ingress | Classic Ingress (when `spec.ingress.enabled: true`) |
+| `-route` | HTTPRoute | Gateway API HTTPRoute (when `spec.gateway.enabled: true`) |
