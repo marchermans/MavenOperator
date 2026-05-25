@@ -44,11 +44,14 @@ spec:
                 - rule: "self.type != 'Hosted' || self.auth.upload.policy != 'Authenticated' || self.auth.upload.users.size() > 0 || self.auth.upload.ciTrust.size() > 0"
                   message: "spec.auth.upload requires users or ciTrust when type is Hosted and policy is Authenticated"
                 # Cannot enable both ingress and gateway simultaneously.
-                - rule: "!((has(self.ingress) && self.ingress.enabled) && (has(self.gateway) && self.gateway.enabled))"
+                - rule: "!((has(self.ingress) ? self.ingress.enabled : false) && (has(self.gateway) ? self.gateway.enabled : false))"
                   message: "spec.ingress and spec.gateway cannot both be enabled at the same time"
                 # Gateway enabled → gatewayRef.name must be present.
-                - rule: "!(has(self.gateway) && self.gateway.enabled) || (has(self.gateway.gatewayRef) && self.gateway.gatewayRef.name != '')"
+                - rule: "!(has(self.gateway) ? self.gateway.enabled : false) || (has(self.gateway) && has(self.gateway.gatewayRef) && self.gateway.gatewayRef.name != '')"
                   message: "spec.gateway.gatewayRef.name is required when gateway is enabled"
+                # If extensionRefs are provided, each ref must include group/kind/name.
+                - rule: "!(has(self.gateway) && has(self.gateway.extensionRefs)) || self.gateway.extensionRefs.all(r, r.group != '' && r.kind != '' && r.name != '')"
+                  message: "spec.gateway.extensionRefs entries must include group, kind, and name"
               properties:
                 type:
                   type: string
@@ -314,6 +317,23 @@ spec:
                       additionalProperties:
                         type: string
                       description: Extra annotations merged into the generated HTTPRoute metadata.
+                    extensionRefs:
+                      type: array
+                      description: >
+                        Optional HTTPRoute ExtensionRef filters attached to each rule. This enables
+                        integration with gateway-specific middleware (for example Traefik WAF middleware).
+                      items:
+                        type: object
+                        properties:
+                          group:
+                            type: string
+                            description: API group of the extension resource, for example traefik.io.
+                          kind:
+                            type: string
+                            description: Kind of the extension resource, for example Middleware.
+                          name:
+                            type: string
+                            description: Name of the extension resource in the HTTPRoute namespace.
                 metrics:
                   type: object
                   properties:

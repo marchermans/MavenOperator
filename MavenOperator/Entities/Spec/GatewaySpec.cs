@@ -55,6 +55,12 @@ public sealed class GatewaySpec
     /// Extra annotations merged into the generated <c>HTTPRoute</c>.
     /// </summary>
     public Dictionary<string, string> RouteAnnotations { get; set; } = new();
+
+    /// <summary>
+    /// Optional Gateway API <c>ExtensionRef</c> filters attached to every HTTPRoute rule.
+    /// This can be used to require middleware integration (for example Traefik WAF middleware).
+    /// </summary>
+    public List<GatewayExtensionRefSpec> ExtensionRefs { get; set; } = new();
 }
 
 /// <summary>
@@ -113,5 +119,26 @@ public sealed class CertManagerSpec
     /// Defaults to true.
     /// </summary>
     public bool AutoCreate { get; set; } = true;
+}
+
+/// <summary>
+/// Gateway API HTTPRoute filter extension reference.
+/// </summary>
+public sealed class GatewayExtensionRefSpec
+{
+    /// <summary>
+    /// API group of the extension resource, for example <c>traefik.io</c>.
+    /// </summary>
+    public string Group { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Kind of the extension resource, for example <c>Middleware</c>.
+    /// </summary>
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Name of the extension resource in the same namespace as the HTTPRoute.
+    /// </summary>
+    public string Name { get; set; } = string.Empty;
 }
 

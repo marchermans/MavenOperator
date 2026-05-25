@@ -120,6 +120,26 @@ public sealed class GatewayApiService : IGatewayApiService
             },
         };
 
+        if (gatewaySpec.ExtensionRefs.Count > 0)
+        {
+            rules[0]["filters"] = gatewaySpec.ExtensionRefs
+                .Where(x => !string.IsNullOrWhiteSpace(x.Group) &&
+                            !string.IsNullOrWhiteSpace(x.Kind) &&
+                            !string.IsNullOrWhiteSpace(x.Name))
+                .Select(x => new Dictionary<string, object?>
+                {
+                    ["type"] = "ExtensionRef",
+                    ["extensionRef"] = new Dictionary<string, string>
+                    {
+                        ["group"] = x.Group,
+                        ["kind"] = x.Kind,
+                        ["name"] = x.Name,
+                    },
+                })
+                .Cast<object?>()
+                .ToList();
+        }
+
         var spec = new Dictionary<string, object?>
         {
             ["parentRefs"] = parentRefs,
