@@ -844,6 +844,7 @@ public sealed class KubernetesResourceManager(
         catch (HttpOperationException ex) when (IsForbidden(ex))
         {
             logger.LogWarning(
+                ex,
                 "Missing RBAC to manage Certificate {Namespace}/{Name}; skipping Certificate creation",
                 ns,
                 certificateName);
