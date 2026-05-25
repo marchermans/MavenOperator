@@ -87,6 +87,33 @@ public interface IKubernetesResourceManager
         CancellationToken ct);
 
     /// <summary>
+    /// Ensures a Gateway API HTTPRoute exists for the given repository.
+    /// Creates or updates the HTTPRoute based on the provided GatewaySpec.
+    /// Returns false when the HTTPRoute CRD is not installed on the target cluster.
+    /// </summary>
+    Task<bool> EnsureHttpRouteAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string routeName,
+        string serviceName,
+        int servicePort,
+        GatewaySpec gatewaySpec,
+        string repositoryName,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Ensures a CertManager Certificate exists for the given hostname.
+    /// Creates or updates the Certificate based on the provided CertManagerSpec.
+    /// Returns false when CertManager CRD is not installed or CertManager is not configured.
+    /// </summary>
+    Task<bool> EnsureCertificateAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string certificateName,
+        string hostname,
+        GatewaySpec gatewaySpec,
+        string repositoryName,
+        CancellationToken ct);
+
+    /// <summary>
     /// Ensures a Prometheus PodMonitor exists for repository pod scraping.
     /// Returns false when the PodMonitor CRD is not installed on the target cluster.
     /// </summary>
@@ -681,6 +708,148 @@ public sealed class KubernetesResourceManager(
         }
     }
 
+    // ── Gateway API HTTPRoute ──────────────────────────────────────────────────
+
+    public async Task<bool> EnsureHttpRouteAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string routeName,
+        string serviceName,
+        int servicePort,
+        GatewaySpec gatewaySpec,
+        string repositoryName,
+        CancellationToken ct)
+    {
+        if (kubernetes is null)
+        {
+            logger.LogDebug(
+                "Raw Kubernetes client unavailable; skipping HTTPRoute {Name}",
+                routeName);
+            return false;
+        }
+
+        var ns = owner.Metadata.NamespaceProperty!;
+        var gatewayApiService = new GatewayApiService();
+        var httpRoute = gatewayApiService.BuildHttpRoute(routeName, ns, serviceName, servicePort, gatewaySpec, repositoryName);
+        var httpRouteJson = System.Text.Json.JsonSerializer.Serialize(httpRoute);
+        var patch = new V1Patch(httpRouteJson, V1Patch.PatchType.ApplyPatch);
+
+        const string httpRouteApiGroup = "gateway.networking.k8s.io";
+        const string httpRouteApiVersion = "v1";
+        const string httpRoutePlural = "httproutes";
+
+        try
+        {
+            await kubernetes.CustomObjects.PatchNamespacedCustomObjectAsync(
+                patch,
+                httpRouteApiGroup,
+                httpRouteApiVersion,
+                ns,
+                httpRoutePlural,
+                routeName,
+                fieldManager: FieldManager,
+                force: true,
+                cancellationToken: ct);
+
+            logger.LogInformation("Ensured HTTPRoute {Namespace}/{Name}", ns, routeName);
+            return true;
+        }
+        catch (HttpOperationException ex) when (IsNotFound(ex))
+        {
+            logger.LogDebug(
+                "HTTPRoute CRD unavailable on cluster; skipping HTTPRoute {Namespace}/{Name}",
+                ns,
+                routeName);
+            return false;
+        }
+        catch (HttpOperationException ex) when (IsForbidden(ex))
+        {
+            logger.LogWarning(
+                "Missing RBAC to manage HTTPRoute {Namespace}/{Name}; skipping HTTPRoute creation",
+                ns,
+                routeName);
+            return false;
+        }
+    }
+
+    // ── CertManager Certificate ────────────────────────────────────────────────
+
+    public async Task<bool> EnsureCertificateAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string certificateName,
+        string hostname,
+        GatewaySpec gatewaySpec,
+        string repositoryName,
+        CancellationToken ct)
+    {
+        if (kubernetes is null)
+        {
+            logger.LogDebug(
+                "Raw Kubernetes client unavailable; skipping Certificate {Name}",
+                certificateName);
+            return false;
+        }
+
+        if (gatewaySpec.CertManager is null || !gatewaySpec.CertManager.AutoCreate)
+        {
+            logger.LogDebug("CertManager not configured; skipping Certificate {Name}", certificateName);
+            return false;
+        }
+
+        var ns = owner.Metadata.NamespaceProperty!;
+        var gatewayApiService = new GatewayApiService();
+        var certificate = gatewayApiService.BuildCertificate(
+            certificateName,
+            ns,
+            hostname,
+            gatewaySpec.CertManager.Email,
+            gatewaySpec.CertManager);
+
+        if (certificate is null)
+        {
+            return false;
+        }
+
+        var certificateJson = System.Text.Json.JsonSerializer.Serialize(certificate);
+        var patch = new V1Patch(certificateJson, V1Patch.PatchType.ApplyPatch);
+
+        const string certManagerApiGroup = "cert-manager.io";
+        const string certManagerApiVersion = "v1";
+        const string certificatePlural = "certificates";
+
+        try
+        {
+            await kubernetes.CustomObjects.PatchNamespacedCustomObjectAsync(
+                patch,
+                certManagerApiGroup,
+                certManagerApiVersion,
+                ns,
+                certificatePlural,
+                certificateName,
+                fieldManager: FieldManager,
+                force: true,
+                cancellationToken: ct);
+
+            logger.LogInformation("Ensured Certificate {Namespace}/{Name}", ns, certificateName);
+            return true;
+        }
+        catch (HttpOperationException ex) when (IsNotFound(ex))
+        {
+            logger.LogDebug(
+                "CertManager CRD unavailable on cluster; skipping Certificate {Namespace}/{Name}",
+                ns,
+                certificateName);
+            return false;
+        }
+        catch (HttpOperationException ex) when (IsForbidden(ex))
+        {
+            logger.LogWarning(
+                "Missing RBAC to manage Certificate {Namespace}/{Name}; skipping Certificate creation",
+                ns,
+                certificateName);
+            return false;
+        }
+    }
+
     // ── PVC deletion ──────────────────────────────────────────────────────────
 
     public async Task DeletePvcIfExistsAsync(string pvcName, string namespaceName, CancellationToken ct)
@@ -703,5 +872,3 @@ public sealed class KubernetesResourceManager(
         }
     }
 }
-
-

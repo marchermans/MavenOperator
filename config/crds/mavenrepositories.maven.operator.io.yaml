@@ -265,7 +265,45 @@ spec:
                     tlsSecretRef:
                       type: string
                       nullable: true
-                      description: Name of a TLS Secret in the same namespace for HTTPS status URL construction.
+                      description: >
+                        Name of a TLS Secret in the same namespace for HTTPS termination.
+                        When set, status.url is prefixed with https:// otherwise http://.
+                        Cannot be combined with spec.gateway.certManager.
+                    certManager:
+                      type: object
+                      nullable: true
+                      description: >
+                        CertManager Certificate issuer configuration for automatic TLS certificate provisioning.
+                        When enabled, the operator creates a Certificate resource and the secret name is
+                        automatically managed by CertManager. Cannot be combined with spec.gateway.tlsSecretRef.
+                      properties:
+                        issuerName:
+                          type: string
+                          description: >
+                            Name of an existing CertManager Issuer or ClusterIssuer resource.
+                            Required when CertManager support is enabled.
+                        isClusterIssuer:
+                          type: boolean
+                          default: false
+                          description: >
+                            Whether the referenced issuer is a ClusterIssuer (true) or Issuer (false).
+                            Defaults to false (Issuer in the same namespace).
+                        email:
+                          type: string
+                          nullable: true
+                          description: >
+                            Optional email address for the certificate. Some issuers require this
+                            (e.g. Let's Encrypt).
+                        renewBefore:
+                          type: string
+                          default: "2160h"
+                          description: >
+                            Duration after which the certificate should be renewed.
+                            Defaults to 2160h (90 days). Set to a shorter duration for testing.
+                        autoCreate:
+                          type: boolean
+                          default: true
+                          description: Whether to automatically create the Certificate resource if it doesn't exist.
                     routeLabels:
                       type: object
                       additionalProperties:

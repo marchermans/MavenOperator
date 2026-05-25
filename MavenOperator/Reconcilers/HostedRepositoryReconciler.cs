@@ -143,7 +143,7 @@ public sealed class HostedRepositoryReconciler(
         entity.Status.SetCondition("Available", isTrue: true,
             reason: "DeploymentEnsured", message: "NGINX deployment ensured");
 
-        // 6 ── Ingress (optional) ─────────────────────────────────────────────
+        // 6 ── Ingress or Gateway API (optional) ──────────────────────────────
         if (spec.Ingress.Enabled)
         {
             await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
@@ -155,6 +155,28 @@ public sealed class HostedRepositoryReconciler(
             entity.Status.Url = spec.Ingress.Host is not null
                 ? $"{scheme}://{spec.Ingress.Host}{ingressPath}"
                 : ingressPath;
+        }
+        else if (spec.Gateway.Enabled)
+        {
+            var httpRouteCreated = await resources.EnsureHttpRouteAsync(
+                entity, $"{name}-route", $"{name}-svc", 80, spec.Gateway, name, ct);
+
+            if (httpRouteCreated)
+            {
+                await resources.EnsureCertificateAsync(
+                    entity, $"{name}-cert", spec.Gateway.Hostname ?? name, spec.Gateway, name, ct);
+
+                entity.Status.SetCondition("GatewayReady", isTrue: true,
+                    reason: "HTTPRouteEnsured", message: $"HTTPRoute for hostname '{spec.Gateway.Hostname}' ensured");
+            }
+
+            // Set URL from Gateway
+            var gatewayPath = spec.Gateway.Path ?? $"/repository/{name}";
+            var tls = !string.IsNullOrWhiteSpace(spec.Gateway.TlsSecretRef) || spec.Gateway.CertManager?.AutoCreate == true;
+            var scheme = tls ? "https" : "http";
+            entity.Status.Url = spec.Gateway.Hostname is not null
+                ? $"{scheme}://{spec.Gateway.Hostname}{gatewayPath}"
+                : gatewayPath;
         }
         else
         {

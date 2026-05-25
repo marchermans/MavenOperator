@@ -27,6 +27,9 @@ builder.Services.AddSingleton<IAuthProxyConfigRenderer, AuthProxyConfigRenderer>
 builder.Services.AddSingleton<INginxConfigRenderer, NginxConfigRenderer>();
 builder.Services.AddSingleton<IKubernetesResourceManager, KubernetesResourceManager>();
 
+// ── Phase 8 Gateway API services ──────────────────────────────────────────────
+builder.Services.AddSingleton<IGatewayApiService, GatewayApiService>();
+
 // ── Phase 4 services ─────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IKubernetesEventService, KubernetesEventService>();
 

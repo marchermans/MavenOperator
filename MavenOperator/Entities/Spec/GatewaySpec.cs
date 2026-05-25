@@ -35,8 +35,16 @@ public sealed class GatewaySpec
     /// Name of a TLS <c>Secret</c> in the same namespace used for HTTPS termination.
     /// When set, <c>status.url</c> is prefixed with <c>https://</c>;
     /// otherwise <c>http://</c> is used.
+    /// Cannot be combined with <see cref="CertManager"/>.
     /// </summary>
     public string? TlsSecretRef { get; set; }
+
+    /// <summary>
+    /// CertManager <c>Certificate</c> issuer configuration for automatic TLS certificate provisioning.
+    /// When enabled, the operator creates a <c>Certificate</c> resource and the secret
+    /// name is automatically managed by CertManager. Cannot be combined with <see cref="TlsSecretRef"/>.
+    /// </summary>
+    public CertManagerSpec? CertManager { get; set; }
 
     /// <summary>
     /// Extra labels merged into the generated <c>HTTPRoute</c>.
@@ -70,5 +78,40 @@ public sealed class GatewayRefSpec
     /// When absent the route attaches to all compatible listeners.
     /// </summary>
     public string? SectionName { get; set; }
+}
+
+/// <summary>
+/// CertManager configuration for automatic TLS certificate provisioning.
+/// </summary>
+public sealed class CertManagerSpec
+{
+    /// <summary>
+    /// Name of an existing CertManager <c>Issuer</c> or <c>ClusterIssuer</c> resource.
+    /// Required when CertManager support is enabled.
+    /// </summary>
+    public string IssuerName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the referenced issuer is a <c>ClusterIssuer</c> (true) or <c>Issuer</c> (false).
+    /// Defaults to false (Issuer in the same namespace).
+    /// </summary>
+    public bool IsClusterIssuer { get; set; } = false;
+
+    /// <summary>
+    /// Optional email address for the certificate. Some issuers require this (e.g. Let's Encrypt).
+    /// </summary>
+    public string? Email { get; set; }
+
+    /// <summary>
+    /// Duration after which the certificate should be renewed.
+    /// Defaults to "2160h" (90 days). Set to a shorter duration for testing.
+    /// </summary>
+    public string RenewBefore { get; set; } = "2160h";
+
+    /// <summary>
+    /// Whether to automatically create the Certificate resource if it doesn't exist.
+    /// Defaults to true.
+    /// </summary>
+    public bool AutoCreate { get; set; } = true;
 }
 
