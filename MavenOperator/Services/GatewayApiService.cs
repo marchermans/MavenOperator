@@ -108,11 +108,11 @@ public sealed class GatewayApiService : IGatewayApiService
                         },
                     },
                 },
-                ["forwardTo"] = new[]
+                ["backendRefs"] = new[]
                 {
                     new Dictionary<string, object?>
                     {
-                        ["serviceName"] = serviceName,
+                        ["name"] = serviceName,
                         ["port"] = servicePort,
                         ["weight"] = 100,
                     },
@@ -130,28 +130,6 @@ public sealed class GatewayApiService : IGatewayApiService
         if (hostnames.Count > 0)
         {
             spec["hostnames"] = hostnames;
-        }
-
-        // Add TLS configuration if either manual secret or CertManager is enabled
-        var tlsSecretName = BuildTlsSecretName(gatewaySpec, repositoryName);
-        if (!string.IsNullOrWhiteSpace(tlsSecretName))
-        {
-            spec["tls"] = new object[]
-            {
-                new Dictionary<string, object?>
-                {
-                    ["mode"] = "Terminate",
-                    ["certificateRefs"] = new[]
-                    {
-                        new Dictionary<string, string>
-                        {
-                            ["name"] = tlsSecretName,
-                            ["kind"] = "Secret",
-                        },
-                    },
-                    ["hostnames"] = hostnames.Count > 0 ? hostnames : null,
-                },
-            };
         }
 
         return new Dictionary<string, object?>
@@ -224,25 +202,6 @@ public sealed class GatewayApiService : IGatewayApiService
         };
     }
 
-    /// <summary>
-    /// Determines the TLS secret name based on GatewaySpec configuration.
-    /// Returns the manual TlsSecretRef if set, or the CertManager-managed secret name.
-    /// </summary>
-    private static string? BuildTlsSecretName(GatewaySpec gatewaySpec, string repositoryName)
-    {
-        if (!string.IsNullOrWhiteSpace(gatewaySpec.TlsSecretRef))
-        {
-            return gatewaySpec.TlsSecretRef;
-        }
-
-        if (gatewaySpec.CertManager?.AutoCreate == true)
-        {
-            // CertManager creates a secret <certificate-name>-tls by default
-            return $"{repositoryName}-tls";
-        }
-
-        return null;
-    }
 }
 
 
