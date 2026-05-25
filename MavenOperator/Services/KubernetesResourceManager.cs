@@ -764,6 +764,7 @@ public sealed class KubernetesResourceManager(
         catch (HttpOperationException ex) when (IsForbidden(ex))
         {
             logger.LogWarning(
+                ex,
                 "Missing RBAC to manage HTTPRoute {Namespace}/{Name}; skipping HTTPRoute creation",
                 ns,
                 routeName);
