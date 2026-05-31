@@ -147,11 +147,19 @@ public sealed class HostedRepositoryReconciler(
         if (spec.Ingress.Enabled)
         {
             await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
+
+            if (spec.Ingress.CertManager is not null)
+            {
+                await resources.EnsureCertificateAsync(
+                    entity, $"{name}-ingress-cert", spec.Ingress.Host ?? name, spec.Ingress.CertManager, ct);
+            }
+
             entity.Status.SetCondition("IngressReady", isTrue: true,
                 reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
             // Set URL from Ingress
             var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
-            var scheme = spec.Ingress.TlsSecretRef is not null ? "https" : "http";
+            var hasTls = spec.Ingress.TlsSecretRef is not null || spec.Ingress.CertManager?.AutoCreate == true;
+            var scheme = hasTls ? "https" : "http";
             entity.Status.Url = spec.Ingress.Host is not null
                 ? $"{scheme}://{spec.Ingress.Host}{ingressPath}"
                 : ingressPath;
@@ -161,10 +169,10 @@ public sealed class HostedRepositoryReconciler(
             var httpRouteCreated = await resources.EnsureHttpRouteAsync(
                 entity, $"{name}-route", $"{name}-svc", 80, spec.Gateway, name, ct);
 
-            if (httpRouteCreated)
+            if (httpRouteCreated && spec.Gateway.CertManager is not null)
             {
                 await resources.EnsureCertificateAsync(
-                    entity, $"{name}-cert", spec.Gateway.Hostname ?? name, spec.Gateway, name, ct);
+                    entity, $"{name}-cert", spec.Gateway.Hostname ?? name, spec.Gateway.CertManager, ct);
 
                 entity.Status.SetCondition("GatewayReady", isTrue: true,
                     reason: "HTTPRouteEnsured", message: $"HTTPRoute for hostname '{spec.Gateway.Hostname}' ensured");

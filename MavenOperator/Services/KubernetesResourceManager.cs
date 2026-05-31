@@ -109,8 +109,7 @@ public interface IKubernetesResourceManager
         MavenRepositoryV1Alpha1 owner,
         string certificateName,
         string hostname,
-        GatewaySpec gatewaySpec,
-        string repositoryName,
+        CertManagerSpec certManager,
         CancellationToken ct);
 
     /// <summary>
@@ -539,6 +538,13 @@ public sealed class KubernetesResourceManager(
         var path = ingressSpec.Path ?? $"/repository/{repositoryName}";
         var host = ingressSpec.Host ?? string.Empty;
 
+        // Determine the TLS secret name:
+        // - Explicit TlsSecretRef takes priority.
+        // - When CertManager is configured AutoCreate creates a Certificate resource
+        //   whose secretName is "<ingressName>-tls".
+        var effectiveTlsSecretRef = ingressSpec.TlsSecretRef
+            ?? (ingressSpec.CertManager?.AutoCreate == true ? $"{ingressName}-tls" : null);
+
         var existing = await client.GetAsync<V1Ingress>(ingressName, ns, ct);
         if (existing is not null)
         {
@@ -573,20 +579,30 @@ public sealed class KubernetesResourceManager(
             },
         };
 
-        var tls = ingressSpec.TlsSecretRef is not null
+        var tls = effectiveTlsSecretRef is not null
             ? new List<V1IngressTLS>
               {
                   new V1IngressTLS
                   {
                       Hosts      = string.IsNullOrWhiteSpace(host) ? null : [host],
-                      SecretName = ingressSpec.TlsSecretRef,
+                      SecretName = effectiveTlsSecretRef,
                   },
               }
             : null;
 
+        var meta = BuildMeta(ingressName, ns, owner, setOwnerReference: true);
+        if (ingressSpec.Annotations.Count > 0)
+        {
+            meta.Annotations ??= new Dictionary<string, string>();
+            foreach (var kv in ingressSpec.Annotations)
+            {
+                meta.Annotations[kv.Key] = kv.Value;
+            }
+        }
+
         var ingress = new V1Ingress
         {
-            Metadata = BuildMeta(ingressName, ns, owner, setOwnerReference: true),
+            Metadata = meta,
             Spec = new V1IngressSpec
             {
                 Rules = rules,
@@ -778,8 +794,7 @@ public sealed class KubernetesResourceManager(
         MavenRepositoryV1Alpha1 owner,
         string certificateName,
         string hostname,
-        GatewaySpec gatewaySpec,
-        string repositoryName,
+        CertManagerSpec certManager,
         CancellationToken ct)
     {
         if (kubernetes is null)
@@ -790,9 +805,9 @@ public sealed class KubernetesResourceManager(
             return false;
         }
 
-        if (gatewaySpec.CertManager is null || !gatewaySpec.CertManager.AutoCreate)
+        if (!certManager.AutoCreate)
         {
-            logger.LogDebug("CertManager not configured; skipping Certificate {Name}", certificateName);
+            logger.LogDebug("CertManager AutoCreate=false; skipping Certificate {Name}", certificateName);
             return false;
         }
 
@@ -802,8 +817,8 @@ public sealed class KubernetesResourceManager(
             certificateName,
             ns,
             hostname,
-            gatewaySpec.CertManager.Email,
-            gatewaySpec.CertManager);
+            certManager.Email,
+            certManager);
 
         if (certificate is null)
         {

@@ -23,7 +23,23 @@ public sealed class IngressSpec
 
     /// <summary>
     /// Name of a TLS Secret for HTTPS termination at the Ingress. Optional.
+    /// Cannot be combined with <see cref="CertManager"/>.
     /// </summary>
     public string? TlsSecretRef { get; set; }
+
+    /// <summary>
+    /// CertManager <c>Certificate</c> issuer configuration for automatic TLS certificate provisioning.
+    /// When enabled, the operator creates a <c>Certificate</c> resource and the auto-generated
+    /// TLS secret name is used in the Ingress TLS spec.
+    /// Cannot be combined with <see cref="TlsSecretRef"/>.
+    /// </summary>
+    public CertManagerSpec? CertManager { get; set; }
+
+    /// <summary>
+    /// Extra annotations merged into the generated Ingress metadata.
+    /// Useful for configuring ingress-controller-specific behaviour, e.g.
+    /// <c>nginx.ingress.kubernetes.io/rewrite-target</c>.
+    /// </summary>
+    public Dictionary<string, string> Annotations { get; set; } = new();
 }
 
