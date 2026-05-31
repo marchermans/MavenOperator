@@ -96,7 +96,11 @@ server {
     open_file_cache max=10000 inactive=120s;
     open_file_cache_valid 60s;
     open_file_cache_min_uses 2;
-    open_file_cache_errors on;
+    # Do NOT cache file-not-found errors. Maven clients (Gradle, mvn) issue a GET
+    # to check for an existing maven-metadata.xml immediately before PUTting a new
+    # one. With errors cached (errors=on), the post-upload GET verification always
+    # returns 404 for up to open_file_cache_valid seconds even after the file exists.
+    open_file_cache_errors off;
 
     # Health check endpoint — no auth required
     location = /healthz {
