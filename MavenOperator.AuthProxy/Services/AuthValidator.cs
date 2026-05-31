@@ -74,7 +74,7 @@ public sealed class AuthValidator : IAuthValidator
         if (authorizationHeader.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
         {
             var encoded = authorizationHeader["Basic ".Length..].Trim();
-            var (success, role) = ValidateBasic(encoded, direction.HtpasswdPath, isReadDirection);
+            var (success, role) = await ValidateBasicAsync(encoded, direction.HtpasswdPath, isReadDirection, direction.CiTrust, ct);
             return EnforceAcl(direction.Acls, success, role, originalUri);
         }
 
@@ -287,7 +287,12 @@ public sealed class AuthValidator : IAuthValidator
 
     // ── Basic Auth (htpasswd) validation ────────────────────────────────────
 
-    private (bool, string?) ValidateBasic(string encoded, string htpasswdPath, bool isReadDirection)
+    private async Task<(bool, string?)> ValidateBasicAsync(
+        string encoded,
+        string htpasswdPath,
+        bool isReadDirection,
+        IReadOnlyList<CiTrustBindingConfig> ciTrust,
+        CancellationToken ct)
     {
         string decoded;
         try
@@ -304,6 +309,16 @@ public sealed class AuthValidator : IAuthValidator
 
         var username = decoded[..colon];
         var password = decoded[(colon + 1)..];
+
+        // Gradle (and other OAuth2-aware clients) send OIDC tokens as
+        // Basic credentials with the reserved username "oauth2" and the
+        // token as the password.  Treat that as a Bearer JWT request so
+        // CI pipelines using Gradle or similar tools work transparently.
+        if (string.Equals(username, "oauth2", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogDebug("Basic auth with username 'oauth2' detected — treating password as Bearer token");
+            return await ValidateBearerAsync(password, ciTrust, ct);
+        }
 
         if (VerifyHtpasswd(username, password, htpasswdPath))
             return (true, isReadDirection ? "reader" : "deployer");
