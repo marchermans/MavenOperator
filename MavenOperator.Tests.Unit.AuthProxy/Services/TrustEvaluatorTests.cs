@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using MavenOperator.AuthProxy;
 using MavenOperator.AuthProxy.Services;
+ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.IdentityModel.Tokens;
 using Shouldly;
 
@@ -10,7 +11,7 @@ namespace MavenOperator.Tests.Unit.AuthProxy.Services;
 
 public sealed class TrustEvaluatorTests
 {
-    private readonly TrustEvaluator _sut = new();
+    private readonly TrustEvaluator _sut = new(NullLogger<TrustEvaluator>.Instance);
 
     // ── Helper to build JWTs ─────────────────────────────────────────────────
 

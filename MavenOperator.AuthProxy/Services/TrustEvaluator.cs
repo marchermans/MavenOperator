@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using Microsoft.Extensions.Logging;
 
 namespace MavenOperator.AuthProxy.Services;
 
@@ -8,6 +9,13 @@ namespace MavenOperator.AuthProxy.Services;
 /// </summary>
 public sealed class TrustEvaluator : ITrustEvaluator
 {
+    private readonly ILogger<TrustEvaluator> _logger;
+
+    public TrustEvaluator(ILogger<TrustEvaluator> logger)
+    {
+        _logger = logger;
+    }
+
     /// <inheritdoc/>
     public string? EvaluateRole(JwtSecurityToken token, IReadOnlyList<CiTrustBindingConfig> bindings)
     {
@@ -37,9 +45,35 @@ public sealed class TrustEvaluator : ITrustEvaluator
 
             // Check all claim matchers (AND logic)
             if (!AllClaimsMatch(token, binding.Claims))
+            {
+                // Log the actual claim values present in the JWT for diagnostics
+                foreach (var (claimName, pattern) in binding.Claims)
+                {
+                    var actualValues = token.Claims
+                        .Where(c => string.Equals(c.Type, claimName, StringComparison.OrdinalIgnoreCase))
+                        .Select(c => c.Value)
+                        .ToList();
+
+                    if (actualValues.Count == 0)
+                        _logger.LogWarning(
+                            "ciTrust claim mismatch: claim '{ClaimName}' not found in JWT. Expected pattern '{Pattern}'",
+                            claimName, pattern);
+                    else
+                        _logger.LogWarning(
+                            "ciTrust claim mismatch: claim '{ClaimName}' = [{ActualValues}], expected pattern '{Pattern}'",
+                            claimName, string.Join(", ", actualValues), pattern);
+                }
                 continue;
+            }
 
             return binding.Role;
+        }
+
+        // Log all claims present in the token for full diagnostics
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            var allClaims = token.Claims.Select(c => $"{c.Type}={c.Value}");
+            _logger.LogDebug("JWT claims from {Issuer}: {Claims}", issuer, string.Join("; ", allClaims));
         }
 
         return null;
@@ -106,5 +140,3 @@ public sealed class TrustEvaluator : ITrustEvaluator
         return parts[^1].Length == 0 || pos == value.Length;
     }
 }
-
-
