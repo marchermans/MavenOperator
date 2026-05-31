@@ -102,13 +102,14 @@ public sealed class TrustEvaluator : ITrustEvaluator
 
     /// <summary>
     /// Glob matching: '*' matches zero or more characters (at any position).
-    /// Matching is case-sensitive.
+    /// Matching is case-insensitive — CI platform identifiers (org names, repo names)
+    /// are case-insensitive by definition (GitHub, GitLab, etc.).
     /// </summary>
     public static bool GlobMatch(string pattern, string value)
     {
         // Shortcut: no wildcard
         if (!pattern.Contains('*'))
-            return string.Equals(pattern, value, StringComparison.Ordinal);
+            return string.Equals(pattern, value, StringComparison.OrdinalIgnoreCase);
 
         // Split on '*' and match parts in order
         var parts = pattern.Split('*');
@@ -125,7 +126,7 @@ public sealed class TrustEvaluator : ITrustEvaluator
                 continue;
             }
 
-            var idx = value.IndexOf(part, pos, StringComparison.Ordinal);
+            var idx = value.IndexOf(part, pos, StringComparison.OrdinalIgnoreCase);
             if (idx < 0)
                 return false;
 

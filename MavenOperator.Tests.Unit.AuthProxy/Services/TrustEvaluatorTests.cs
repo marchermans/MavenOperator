@@ -141,9 +141,33 @@ public sealed class TrustEvaluatorTests
     [InlineData("refs/heads/*",         "refs/heads/main",        true)]
     [InlineData("refs/heads/main",      "refs/heads/main",        true)]
     [InlineData("refs/heads/main",      "refs/heads/feature",     false)]
+    // Case-insensitive: CI platform identifiers (org/repo names) are case-insensitive
+    [InlineData("communi-suggestu",     "Communi-Suggestu",       true)]
+    [InlineData("communi-suggestu",     "COMMUNI-SUGGESTU",       true)]
+    [InlineData("acme-org/*",           "ACME-ORG/my-service",    true)]
+    [InlineData("acme-org/*",           "Acme-Org/My-Service",    true)]
     public void GlobMatch_Scenarios(string pattern, string value, bool expected)
     {
         TrustEvaluator.GlobMatch(pattern, value).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void EvaluateRole_ReturnsRole_WhenClaimValueDiffersOnlyInCase()
+    {
+        // Regression test: GitHub OIDC tokens carry the org name with original casing
+        // (e.g. "Communi-Suggestu") but operators typically configure it lowercase.
+        var token = BuildToken(
+            "https://token.actions.githubusercontent.com",
+            [new("repository_owner", "Communi-Suggestu")]);  // capital C and S from JWT
+
+        var binding = new CiTrustBindingConfig
+        {
+            Platform = "github-actions",
+            Role     = "deployer",
+            Claims   = new() { { "repository_owner", "communi-suggestu" } }, // lowercase in CRD
+        };
+
+        _sut.EvaluateRole(token, [binding]).ShouldBe("deployer");
     }
 
     [Fact]
