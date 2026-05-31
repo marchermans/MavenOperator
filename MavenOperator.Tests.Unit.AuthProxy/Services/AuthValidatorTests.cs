@@ -222,6 +222,68 @@ public sealed class AuthValidatorTests
         result.Success.ShouldBeFalse();
     }
 
+    // ── Anonymous policy with credentials present ────────────────────────────
+
+    [Fact]
+    public async Task ValidateAsync_AnonymousDownload_AllowsEvenWhenBearerTokenPresent()
+    {
+        // Regression test: Gradle sends the same Bearer token on GETs as on PUTs.
+        // If the download policy is Anonymous, the request must be allowed regardless
+        // of whether the provided token validates against any CiTrust binding.
+        var sut = BuildValidator(new AuthProxyConfig
+        {
+            Download = new AuthDirectionConfig
+            {
+                Policy   = "Anonymous",
+                CiTrust  = [],   // no CiTrust — token cannot match anything
+                HtpasswdPath = "/tmp/unused-download.htpasswd",
+            },
+            Upload = new AuthDirectionConfig
+            {
+                Policy       = "Authenticated",
+                HtpasswdPath = "/tmp/unused-upload.htpasswd",
+            },
+        });
+
+        // Gradle sends its OIDC token even on the metadata GET after a successful upload
+        var bearerHeader = "Bearer some.jwt.token";
+
+        var result = await sut.ValidateAsync(bearerHeader,
+            "/repository/formatum-adhibe/com/example/maven-metadata.xml", "GET");
+
+        result.Success.ShouldBeTrue("Anonymous policy must allow access even when credentials are present");
+        result.Role.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_AnonymousDownload_AllowsWhenBasicOauth2Present()
+    {
+        // Same scenario via Basic oauth2 header (Gradle with Basic auth mode)
+        var sut = BuildValidator(new AuthProxyConfig
+        {
+            Download = new AuthDirectionConfig
+            {
+                Policy   = "Anonymous",
+                CiTrust  = [],
+                HtpasswdPath = "/tmp/unused-download.htpasswd",
+            },
+            Upload = new AuthDirectionConfig
+            {
+                Policy       = "Authenticated",
+                HtpasswdPath = "/tmp/unused-upload.htpasswd",
+            },
+        });
+
+        var basicHeader = "Basic " + Convert.ToBase64String(
+            System.Text.Encoding.UTF8.GetBytes("oauth2:some.jwt.token"));
+
+        var result = await sut.ValidateAsync(basicHeader,
+            "/repository/formatum-adhibe/com/example/maven-metadata.xml", "GET");
+
+        result.Success.ShouldBeTrue("Anonymous policy must allow access even when oauth2 Basic header is present");
+        result.Role.ShouldBeNull();
+    }
+
     private static AuthValidator BuildValidator(AuthProxyConfig config)
     {
         var options = Substitute.For<IOptionsMonitor<AuthProxyConfig>>();

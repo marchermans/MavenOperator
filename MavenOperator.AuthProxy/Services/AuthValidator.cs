@@ -59,10 +59,14 @@ public sealed class AuthValidator : IAuthValidator
         var isReadDirection = IsReadMethod(originalMethod);
         var direction = GetDirectionConfig(_config.CurrentValue, isReadDirection);
 
+        // Anonymous policy: allow unconditionally regardless of what credentials the client sends.
+        // Clients like Gradle send the same Bearer token on GETs as they do on PUTs — we must
+        // not fail the request just because the download direction has no CiTrust configured.
+        if (AllowsAnonymous(direction))
+            return (true, null);
+
         if (string.IsNullOrWhiteSpace(authorizationHeader))
-            return AllowsAnonymous(direction)
-                ? (true, null)
-                : (false, null);
+            return (false, null);
 
         if (authorizationHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
         {
