@@ -465,57 +465,76 @@ public sealed class KubernetesResourceManager(
     {
         var ns = owner.Metadata.NamespaceProperty!;
 
-        var existing = await client.GetAsync<V1Service>(serviceName, ns, ct);
-        if (existing is not null)
+        for (var attempt = 0; attempt < 4; attempt++)
         {
-            // Validate that port configuration matches desired state
-            var existingPorts = existing.Spec?.Ports ?? [];
-            var portsMatch = existingPorts.Count == ports.Count &&
-                existingPorts.All(ep =>
-                    ports.Any(dp =>
-                        dp.Port == ep.Port &&
-                        dp.TargetPort == ep.TargetPort &&
-                        dp.Name == ep.Name));
-
-            if (portsMatch)
+            var existing = await client.GetAsync<V1Service>(serviceName, ns, ct);
+            if (existing is not null)
             {
-                logger.LogDebug("Service {Namespace}/{Name} already exists with matching ports", ns, serviceName);
-                return existing;
+                // Compare by value (including IntOrString target ports), not object reference.
+                var existingPorts = existing.Spec?.Ports ?? [];
+                var portsMatch = existingPorts.Count == ports.Count &&
+                    existingPorts.All(ep =>
+                        ports.Any(dp =>
+                            dp.Port == ep.Port &&
+                            string.Equals(dp.Name, ep.Name, StringComparison.Ordinal) &&
+                            string.Equals(dp.TargetPort?.ToString(), ep.TargetPort?.ToString(), StringComparison.Ordinal)));
+
+                if (portsMatch)
+                {
+                    logger.LogDebug("Service {Namespace}/{Name} already exists with matching ports", ns, serviceName);
+                    return existing;
+                }
+
+                try
+                {
+                    existing.Spec ??= new V1ServiceSpec();
+                    existing.Spec.Type ??= "ClusterIP";
+                    existing.Spec.Selector = new Dictionary<string, string> { ["app"] = selectorAppLabel };
+                    existing.Spec.Ports = ports
+                        .Select(p => new V1ServicePort
+                        {
+                            Name = p.Name,
+                            Port = p.Port,
+                            TargetPort = p.TargetPort,
+                            Protocol = string.IsNullOrWhiteSpace(p.Protocol) ? "TCP" : p.Protocol,
+                        })
+                        .ToList();
+
+                    var updated = await client.UpdateAsync(existing, ct);
+                    logger.LogInformation("Updated Service {Namespace}/{Name} port configuration", ns, serviceName);
+                    return updated;
+                }
+                catch (HttpOperationException ex) when (IsConflict(ex))
+                {
+                    logger.LogDebug("Service {Namespace}/{Name} update conflict — retrying", ns, serviceName);
+                    continue;
+                }
             }
 
-            logger.LogInformation("Service {Namespace}/{Name} exists but port configuration changed — deleting for recreation", ns, serviceName);
+            var svc = new V1Service
+            {
+                Metadata = BuildMeta(serviceName, ns, owner, setOwnerReference: true),
+                Spec = new V1ServiceSpec
+                {
+                    Type     = "ClusterIP",
+                    Selector = new Dictionary<string, string> { ["app"] = selectorAppLabel },
+                    Ports    = ports,
+                },
+            };
+
             try
             {
-                await client.DeleteAsync<V1Service>(serviceName, ns, ct);
+                var created = await client.CreateAsync(svc, ct);
+                logger.LogInformation("Created Service {Namespace}/{Name}", ns, serviceName);
+                return created;
             }
-            catch (Exception ex)
+            catch (HttpOperationException ex) when (IsConflict(ex))
             {
-                logger.LogWarning(ex, "Failed to delete Service {Namespace}/{Name} for recreation", ns, serviceName);
+                logger.LogDebug("Service {Namespace}/{Name} already exists (race) — retrying", ns, serviceName);
             }
         }
 
-        var svc = new V1Service
-        {
-            Metadata = BuildMeta(serviceName, ns, owner, setOwnerReference: true),
-            Spec = new V1ServiceSpec
-            {
-                Type     = "ClusterIP",
-                Selector = new Dictionary<string, string> { ["app"] = selectorAppLabel },
-                Ports    = ports,
-            },
-        };
-
-        try
-        {
-            var created = await client.CreateAsync(svc, ct);
-            logger.LogInformation("Created Service {Namespace}/{Name}", ns, serviceName);
-            return created;
-        }
-        catch (HttpOperationException ex) when (IsConflict(ex))
-        {
-            logger.LogDebug("Service {Namespace}/{Name} already exists (race) — fetching", ns, serviceName);
-            return (await client.GetAsync<V1Service>(serviceName, ns, ct))!;
-        }
+        throw new InvalidOperationException($"Failed to ensure Service {ns}/{serviceName} after retries.");
     }
 
     // ── Conflict-retry helpers ────────────────────────────────────────────────
