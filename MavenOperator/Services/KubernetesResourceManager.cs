@@ -185,8 +185,30 @@ public sealed class KubernetesResourceManager(
         var existing = await client.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
         if (existing is not null)
         {
-            logger.LogDebug("PVC {Namespace}/{Name} already exists — skipping", ns, pvcName);
-            return existing;
+            // Validate that size, access mode, and storage class match desired state
+            var existingSize = existing.Spec?.Resources?.Requests?.TryGetValue("storage", out var sizeQty) == true
+                ? sizeQty.ToString()
+                : string.Empty;
+            var existingAccessMode = existing.Spec?.AccessModes?.FirstOrDefault() ?? string.Empty;
+            var existingStorageClass = existing.Spec?.StorageClassName ?? string.Empty;
+
+            if (existingSize == size &&
+                existingAccessMode == accessMode &&
+                existingStorageClass == (storageClassName ?? string.Empty))
+            {
+                logger.LogDebug("PVC {Namespace}/{Name} already exists with matching properties", ns, pvcName);
+                return existing;
+            }
+
+            logger.LogInformation("PVC {Namespace}/{Name} exists but properties changed — deleting for recreation", ns, pvcName);
+            try
+            {
+                await client.DeleteAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete PVC {Namespace}/{Name} for recreation", ns, pvcName);
+            }
         }
 
         var pvc = new V1PersistentVolumeClaim
@@ -446,8 +468,30 @@ public sealed class KubernetesResourceManager(
         var existing = await client.GetAsync<V1Service>(serviceName, ns, ct);
         if (existing is not null)
         {
-            logger.LogDebug("Service {Namespace}/{Name} already exists", ns, serviceName);
-            return existing;
+            // Validate that port configuration matches desired state
+            var existingPorts = existing.Spec?.Ports ?? [];
+            var portsMatch = existingPorts.Count == ports.Count &&
+                existingPorts.All(ep =>
+                    ports.Any(dp =>
+                        dp.Port == ep.Port &&
+                        dp.TargetPort == ep.TargetPort &&
+                        dp.Name == ep.Name));
+
+            if (portsMatch)
+            {
+                logger.LogDebug("Service {Namespace}/{Name} already exists with matching ports", ns, serviceName);
+                return existing;
+            }
+
+            logger.LogInformation("Service {Namespace}/{Name} exists but port configuration changed — deleting for recreation", ns, serviceName);
+            try
+            {
+                await client.DeleteAsync<V1Service>(serviceName, ns, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete Service {Namespace}/{Name} for recreation", ns, serviceName);
+            }
         }
 
         var svc = new V1Service
@@ -568,8 +612,27 @@ public sealed class KubernetesResourceManager(
         var existing = await client.GetAsync<V1Ingress>(ingressName, ns, ct);
         if (existing is not null)
         {
-            logger.LogDebug("Ingress {Namespace}/{Name} already exists", ns, ingressName);
-            return existing;
+            // Validate that host, path, and TLS configuration match desired state
+            var existingHost = existing.Spec?.Rules?.FirstOrDefault()?.Host ?? string.Empty;
+            var existingPath = existing.Spec?.Rules?.FirstOrDefault()?.Http?.Paths?.FirstOrDefault()?.Path ?? string.Empty;
+            var existingTlsSecret = existing.Spec?.Tls?.FirstOrDefault()?.SecretName ?? string.Empty;
+            var desiredTlsSecret = effectiveTlsSecretRef ?? string.Empty;
+
+            if (existingHost == host && existingPath == path && existingTlsSecret == desiredTlsSecret)
+            {
+                logger.LogDebug("Ingress {Namespace}/{Name} already exists with matching configuration", ns, ingressName);
+                return existing;
+            }
+
+            logger.LogInformation("Ingress {Namespace}/{Name} exists but configuration changed — deleting for recreation", ns, ingressName);
+            try
+            {
+                await client.DeleteAsync<V1Ingress>(ingressName, ns, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete Ingress {Namespace}/{Name} for recreation", ns, ingressName);
+            }
         }
 
         var rules = new List<V1IngressRule>
