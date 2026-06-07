@@ -185,30 +185,68 @@ public sealed class KubernetesResourceManager(
         var existing = await client.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
         if (existing is not null)
         {
-            // Validate that size, access mode, and storage class match desired state
             var existingSize = existing.Spec?.Resources?.Requests?.TryGetValue("storage", out var sizeQty) == true
                 ? sizeQty.ToString()
                 : string.Empty;
             var existingAccessMode = existing.Spec?.AccessModes?.FirstOrDefault() ?? string.Empty;
             var existingStorageClass = existing.Spec?.StorageClassName ?? string.Empty;
+            var desiredStorageClass = storageClassName ?? string.Empty;
 
-            if (existingSize == size &&
-                existingAccessMode == accessMode &&
-                existingStorageClass == (storageClassName ?? string.Empty))
+            // Access mode and storage class are immutable for bound PVCs; never delete/recreate in reconcile.
+            if (existingAccessMode != accessMode || existingStorageClass != desiredStorageClass)
             {
-                logger.LogDebug("PVC {Namespace}/{Name} already exists with matching properties", ns, pvcName);
+                logger.LogWarning(
+                    "PVC {Namespace}/{Name} differs on immutable fields (existing accessMode={ExistingAccessMode}, desired accessMode={DesiredAccessMode}, existing storageClass={ExistingStorageClass}, desired storageClass={DesiredStorageClass}); keeping existing claim",
+                    ns,
+                    pvcName,
+                    existingAccessMode,
+                    accessMode,
+                    existingStorageClass,
+                    desiredStorageClass);
                 return existing;
             }
 
-            logger.LogInformation("PVC {Namespace}/{Name} exists but properties changed — deleting for recreation", ns, pvcName);
-            try
+            if (existingSize == size)
             {
-                await client.DeleteAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                logger.LogDebug("PVC {Namespace}/{Name} already exists with matching size", ns, pvcName);
+                return existing;
             }
-            catch (Exception ex)
+
+            for (var attempt = 0; attempt < 4; attempt++)
             {
-                logger.LogWarning(ex, "Failed to delete PVC {Namespace}/{Name} for recreation", ns, pvcName);
+                try
+                {
+                    existing.Spec ??= new V1PersistentVolumeClaimSpec();
+                    existing.Spec.Resources ??= new V1VolumeResourceRequirements();
+                    existing.Spec.Resources.Requests ??= new Dictionary<string, ResourceQuantity>();
+                    existing.Spec.Resources.Requests["storage"] = new ResourceQuantity(size);
+
+                    var updated = await client.UpdateAsync(existing, ct);
+                    logger.LogInformation("Updated PVC {Namespace}/{Name} size from {ExistingSize} to {DesiredSize}",
+                        ns, pvcName, existingSize, size);
+                    return updated;
+                }
+                catch (HttpOperationException ex) when (IsConflict(ex))
+                {
+                    logger.LogDebug("PVC {Namespace}/{Name} update conflict — retrying", ns, pvcName);
+                    existing = await client.GetAsync<V1PersistentVolumeClaim>(pvcName, ns, ct);
+                    if (existing is null)
+                    {
+                        break;
+                    }
+                }
+                catch (HttpOperationException ex) when (IsForbidden(ex) || IsInvalid(ex))
+                {
+                    logger.LogWarning(ex,
+                        "PVC {Namespace}/{Name} size change to {DesiredSize} was rejected by the API/storage class; keeping existing claim",
+                        ns,
+                        pvcName,
+                        size);
+                    return existing;
+                }
             }
+
+            throw new InvalidOperationException($"Failed to ensure PVC {ns}/{pvcName} after retries.");
         }
 
         var pvc = new V1PersistentVolumeClaim
@@ -551,6 +589,10 @@ public sealed class KubernetesResourceManager(
 
     private static bool IsForbidden(HttpOperationException ex)
         => ex.Response?.StatusCode == System.Net.HttpStatusCode.Forbidden;
+
+    private static bool IsInvalid(HttpOperationException ex)
+        => ex.Response?.StatusCode is System.Net.HttpStatusCode.BadRequest
+            or System.Net.HttpStatusCode.UnprocessableEntity;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
