@@ -128,6 +128,25 @@ public interface IKubernetesResourceManager
     /// Errors are swallowed — deletion is best-effort.
     /// </summary>
     Task DeletePvcIfExistsAsync(string pvcName, string namespaceName, CancellationToken ct);
+
+    /// <summary>
+    /// Deletes a standard Kubernetes resource if it exists.
+    /// Errors are swallowed — deletion is best-effort (used during spec-change cleanup).
+    /// </summary>
+    Task DeleteResourceIfExistsAsync<T>(string name, string namespaceName, CancellationToken ct)
+        where T : class, IKubernetesObject<V1ObjectMeta>, new();
+
+    /// <summary>
+    /// Deletes a namespaced custom resource (e.g. HTTPRoute, Certificate, PodMonitor) if it exists.
+    /// Errors are swallowed — deletion is best-effort (used during spec-change cleanup).
+    /// </summary>
+    Task DeleteCustomResourceIfExistsAsync(
+        string group,
+        string version,
+        string plural,
+        string name,
+        string namespaceName,
+        CancellationToken ct);
 }
 
 /// <inheritdoc/>
@@ -886,6 +905,75 @@ public sealed class KubernetesResourceManager(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to delete PVC {Namespace}/{Name}", namespaceName, pvcName);
+        }
+    }
+
+    // ── Generic resource deletion (spec-change cleanup) ───────────────────────
+
+    public async Task DeleteResourceIfExistsAsync<T>(string name, string namespaceName, CancellationToken ct)
+        where T : class, IKubernetesObject<V1ObjectMeta>, new()
+    {
+        try
+        {
+            var existing = await client.GetAsync<T>(name, namespaceName, ct);
+            if (existing is null)
+            {
+                logger.LogDebug("{Kind} {Namespace}/{Name} does not exist — nothing to delete",
+                    typeof(T).Name, namespaceName, name);
+                return;
+            }
+
+            await client.DeleteAsync<T>(name, namespaceName, ct);
+            logger.LogInformation("Deleted {Kind} {Namespace}/{Name} (no longer required by spec)",
+                typeof(T).Name, namespaceName, name);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to delete {Kind} {Namespace}/{Name}",
+                typeof(T).Name, namespaceName, name);
+        }
+    }
+
+    public async Task DeleteCustomResourceIfExistsAsync(
+        string group,
+        string version,
+        string plural,
+        string name,
+        string namespaceName,
+        CancellationToken ct)
+    {
+        if (kubernetes is null)
+        {
+            logger.LogDebug(
+                "Raw Kubernetes client unavailable; skipping deletion of {Group}/{Plural}/{Name}",
+                group, plural, name);
+            return;
+        }
+
+        try
+        {
+            // Try to fetch the resource first so we can skip gracefully if it doesn't exist.
+            await kubernetes.CustomObjects.GetNamespacedCustomObjectAsync(
+                group, version, namespaceName, plural, name, ct);
+
+            await kubernetes.CustomObjects.DeleteNamespacedCustomObjectAsync(
+                group, version, namespaceName, plural, name, cancellationToken: ct);
+
+            logger.LogInformation(
+                "Deleted custom resource {Group}/{Plural}/{Namespace}/{Name} (no longer required by spec)",
+                group, plural, namespaceName, name);
+        }
+        catch (HttpOperationException ex) when (IsNotFound(ex))
+        {
+            logger.LogDebug(
+                "Custom resource {Group}/{Plural}/{Namespace}/{Name} does not exist — nothing to delete",
+                group, plural, namespaceName, name);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to delete custom resource {Group}/{Plural}/{Namespace}/{Name}",
+                group, plural, namespaceName, name);
         }
     }
 }

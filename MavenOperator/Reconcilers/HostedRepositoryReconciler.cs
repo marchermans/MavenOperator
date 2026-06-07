@@ -192,11 +192,59 @@ public sealed class HostedRepositoryReconciler(
             entity.Status.Url = $"http://{name}-svc/repository/{name}";
         }
 
+        // 7 ── Cleanup resources no longer required by spec ────────────────────
+        await CleanupObsoleteResourcesAsync(name, ns, spec, useAuthProxy, ct);
+
         logger.LogInformation("[Hosted] {Namespace}/{Name} reconciled successfully", ns, name);
         await events.PublishAsync(entity, "Ready", $"Hosted repository '{name}' is ready at {entity.Status.Url}", ct: ct);
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Cleans up optional resources that are no longer required by the current spec.
+    /// Called at the end of every reconcile so stale resources from previous specs are removed.
+    /// </summary>
+    private async Task CleanupObsoleteResourcesAsync(
+        string name,
+        string ns,
+        MavenRepositorySpec spec,
+        bool useAuthProxy,
+        CancellationToken ct)
+    {
+        // ── Ingress: delete if no longer enabled ──────────────────────────────
+        if (!spec.Ingress.Enabled)
+        {
+            await resources.DeleteResourceIfExistsAsync<V1Ingress>($"{name}-ingress", ns, ct);
+            // Also remove the CertManager Certificate that may have been created for the Ingress
+            await resources.DeleteCustomResourceIfExistsAsync(
+                "cert-manager.io", "v1", "certificates", $"{name}-ingress-cert", ns, ct);
+        }
+
+        // ── Gateway / HTTPRoute: delete if no longer enabled ──────────────────
+        if (!spec.Gateway.Enabled)
+        {
+            await resources.DeleteCustomResourceIfExistsAsync(
+                "gateway.networking.k8s.io", "v1", "httproutes", $"{name}-route", ns, ct);
+            // Also remove the CertManager Certificate that may have been created for the Gateway
+            await resources.DeleteCustomResourceIfExistsAsync(
+                "cert-manager.io", "v1", "certificates", $"{name}-cert", ns, ct);
+        }
+
+        // ── Metrics: delete PodMonitor + mtail ConfigMap if no longer enabled ─
+        if (!spec.Metrics.Enabled)
+        {
+            await resources.DeleteCustomResourceIfExistsAsync(
+                "monitoring.coreos.com", "v1", "podmonitors", $"{name}-metrics", ns, ct);
+            await resources.DeleteResourceIfExistsAsync<V1ConfigMap>($"{name}-mtail-cm", ns, ct);
+        }
+
+        // ── Auth proxy: delete its ConfigMap if no longer needed ──────────────
+        if (!useAuthProxy)
+        {
+            await resources.DeleteResourceIfExistsAsync<V1ConfigMap>($"{name}-auth-proxy-cm", ns, ct);
+        }
+    }
 
     /// <summary>
     /// Reads each credential Secret from the cluster, extracts username+password,
