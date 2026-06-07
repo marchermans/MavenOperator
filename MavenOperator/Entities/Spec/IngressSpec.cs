@@ -17,7 +17,7 @@ public sealed class IngressSpec
 
     /// <summary>
     /// URL path prefix, e.g. "/repository/my-releases".
-    /// Defaults to "/repository/{name}" if not specified.
+    /// Defaults to <c>spec.pathPrefix</c> when set, otherwise <c>/repository/{name}</c>.
     /// </summary>
     public string? Path { get; set; }
 

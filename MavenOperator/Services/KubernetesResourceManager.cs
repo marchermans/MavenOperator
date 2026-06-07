@@ -554,7 +554,8 @@ public sealed class KubernetesResourceManager(
         CancellationToken ct)
     {
         var ns   = owner.Metadata.NamespaceProperty!;
-        var path = ingressSpec.Path ?? $"/repository/{repositoryName}";
+        var defaultPathPrefix = RepositoryPathHelper.ResolvePathPrefix(owner.Spec, repositoryName);
+        var path = ingressSpec.Path ?? defaultPathPrefix;
         var host = ingressSpec.Host ?? string.Empty;
 
         // Determine the TLS secret name:
@@ -764,7 +765,9 @@ public sealed class KubernetesResourceManager(
 
         var ns = owner.Metadata.NamespaceProperty!;
         var gatewayApiService = new GatewayApiService();
-        var httpRoute = gatewayApiService.BuildHttpRoute(routeName, ns, serviceName, servicePort, gatewaySpec, repositoryName);
+        var defaultPathPrefix = RepositoryPathHelper.ResolvePathPrefix(owner.Spec, repositoryName);
+        var httpRoute = gatewayApiService.BuildHttpRoute(routeName, ns, serviceName, servicePort, gatewaySpec,
+            repositoryName, defaultPathPrefix);
         var httpRouteJson = System.Text.Json.JsonSerializer.Serialize(httpRoute);
         var patch = new V1Patch(httpRouteJson, V1Patch.PatchType.ApplyPatch);
 

@@ -44,6 +44,7 @@ public sealed class HostedRepositoryReconciler(
         var name = entity.Metadata.Name!;
         var ns   = entity.Metadata.NamespaceProperty!;
         var spec = entity.Spec;
+        var repositoryPathPrefix = RepositoryPathHelper.ResolvePathPrefix(spec, name);
 
         logger.LogInformation("[Hosted] Reconciling {Namespace}/{Name}", ns, name);
         await events.PublishAsync(entity, "Provisioning", $"Reconciling Hosted repository '{name}'", ct: ct);
@@ -85,7 +86,7 @@ public sealed class HostedRepositoryReconciler(
 
         // 3 ── NGINX ConfigMap ─────────────────────────────────────────────────
         var nginxConfig  = nginx.RenderHosted(name, spec.Auth.Download.Policy, spec.Auth.Upload.Policy, 
-            spec.Metrics, downloadUsesAuthProxy, uploadUsesAuthProxy);
+            spec.Metrics, downloadUsesAuthProxy, uploadUsesAuthProxy, repositoryPathPrefix);
         var configMapName = $"{name}-nginx-cm";
 
         await resources.EnsureConfigMapAsync(entity, configMapName,
@@ -157,7 +158,7 @@ public sealed class HostedRepositoryReconciler(
             entity.Status.SetCondition("IngressReady", isTrue: true,
                 reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
             // Set URL from Ingress
-            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var ingressPath = spec.Ingress.Path ?? repositoryPathPrefix;
             var hasTls = spec.Ingress.TlsSecretRef is not null || spec.Ingress.CertManager?.AutoCreate == true;
             var scheme = hasTls ? "https" : "http";
             entity.Status.Url = spec.Ingress.Host is not null
@@ -179,7 +180,7 @@ public sealed class HostedRepositoryReconciler(
             }
 
             // Set URL from Gateway
-            var gatewayPath = spec.Gateway.Path ?? $"/repository/{name}";
+            var gatewayPath = spec.Gateway.Path ?? repositoryPathPrefix;
             var tls = !string.IsNullOrWhiteSpace(spec.Gateway.TlsSecretRef) || spec.Gateway.CertManager?.AutoCreate == true;
             var scheme = tls ? "https" : "http";
             entity.Status.Url = spec.Gateway.Hostname is not null
@@ -189,7 +190,7 @@ public sealed class HostedRepositoryReconciler(
         else
         {
             // Use cluster-internal URL
-            entity.Status.Url = $"http://{name}-svc/repository/{name}";
+            entity.Status.Url = RepositoryPathHelper.BuildInternalRepositoryUrl($"{name}-svc", repositoryPathPrefix);
         }
 
         // 7 ── Cleanup resources no longer required by spec ────────────────────

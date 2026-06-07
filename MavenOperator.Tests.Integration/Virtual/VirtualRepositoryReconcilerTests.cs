@@ -38,7 +38,8 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
         string name,
         List<string> members,
         AuthPolicy downloadPolicy      = AuthPolicy.Anonymous,
-        List<string>? downloadSecrets  = null)
+        List<string>? downloadSecrets  = null,
+        string? pathPrefix = null)
     {
         var entity = new MavenRepositoryV1Alpha1
         {
@@ -52,6 +53,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
             Spec = new()
             {
                 Type    = RepositoryType.Virtual,
+                PathPrefix = pathPrefix,
                 Virtual = new() { Members = members, MetadataCacheTtlSeconds = 60 },
                 Auth    = new()
                 {
@@ -127,6 +129,76 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
         var json = cm.Data["appsettings.json"];
         json.ShouldContain("releases");
         json.ShouldContain("snapshots");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_CreatesProxyConfigMap_UsingMemberPathPrefixes()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..6];
+        var memberRoot = $"member-root-{suffix}";
+        var memberNested = $"member-nested-{suffix}";
+        var name = $"int-virt-{suffix}";
+
+        await cluster.Client.CreateAsync(new MavenRepositoryV1Alpha1
+        {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind = "MavenRepository",
+            Metadata = new V1ObjectMeta { Name = memberRoot, NamespaceProperty = cluster.Namespace },
+            Spec = new MavenRepositorySpec
+            {
+                Type = RepositoryType.Hosted,
+                PathPrefix = "/",
+                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Auth = new AuthSpec
+                {
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                },
+            },
+        }, CancellationToken.None);
+
+        await cluster.Client.CreateAsync(new MavenRepositoryV1Alpha1
+        {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind = "MavenRepository",
+            Metadata = new V1ObjectMeta { Name = memberNested, NamespaceProperty = cluster.Namespace },
+            Spec = new MavenRepositorySpec
+            {
+                Type = RepositoryType.Hosted,
+                PathPrefix = "/maven/member-two",
+                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Auth = new AuthSpec
+                {
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                },
+            },
+        }, CancellationToken.None);
+
+        var entity = await BuildEntityAsync(name, members: [memberRoot, memberNested]);
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-proxy-cm", cluster.Namespace, CancellationToken.None);
+        cm.ShouldNotBeNull();
+        var json = cm.Data!["appsettings.json"];
+        json.ShouldContain($"\"baseUrl\": \"http://{memberRoot}-svc\"");
+        json.ShouldContain($"\"baseUrl\": \"http://{memberNested}-svc/maven/member-two\"");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_UsesVirtualPathPrefix_ForNginxConfigAndStatusUrl()
+    {
+        var name = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], pathPrefix: "/");
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-nginx-cm", cluster.Namespace, CancellationToken.None);
+        cm.ShouldNotBeNull();
+        var conf = cm.Data!["default.conf"];
+        conf.ShouldContain("location ~ ^/");
+        conf.ShouldNotContain($"/repository/{name}/");
+        entity.Status.Url.ShouldBe($"http://{name}-svc");
     }
 
     // ── Proxy and NGINX Deployments ───────────────────────────────────────────

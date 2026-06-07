@@ -123,6 +123,45 @@ public sealed class IngressTests(ClusterFixture cluster)
     }
 
     [IntegrationFact]
+    public async Task Ingress_UsesRepositoryPathPrefix_WhenIngressPathIsNull()
+    {
+        var name = "ingress-spec-path-prefix-test";
+        var repo = new MavenRepositoryV1Alpha1
+        {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind       = "MavenRepository",
+            Metadata = new V1ObjectMeta { Name = name, NamespaceProperty = cluster.Namespace },
+            Spec = new MavenRepositorySpec
+            {
+                Type = RepositoryType.Hosted,
+                PathPrefix = "/",
+                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Auth = new AuthSpec
+                {
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                },
+                Ingress = new IngressSpec
+                {
+                    Enabled = true,
+                    Host = "maven.example.com",
+                    Path = null,
+                },
+            },
+        };
+        var entity = await cluster.Client.CreateAsync<MavenRepositoryV1Alpha1>(repo, CancellationToken.None);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var ingress = await cluster.Client.GetAsync<V1Ingress>(
+            $"{name}-ingress", cluster.Namespace, CancellationToken.None);
+
+        ingress.ShouldNotBeNull();
+        ingress.Spec!.Rules![0].Http!.Paths![0].Path.ShouldBe("/");
+        entity.Status.Url.ShouldBe("http://maven.example.com/");
+    }
+
+    [IntegrationFact]
     public async Task StatusUrl_IsSetToIngressUrl_WhenEnabled()
     {
         var name   = "ingress-url-test";

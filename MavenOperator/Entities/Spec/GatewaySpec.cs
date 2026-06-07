@@ -27,7 +27,7 @@ public sealed class GatewaySpec
     /// <summary>
     /// URL path prefix for the <c>HTTPRoute</c> match rule, e.g.
     /// <c>"/repository/my-releases"</c>.
-    /// Defaults to <c>/repository/{MavenRepository.Name}</c> when not specified.
+    /// Defaults to <c>spec.pathPrefix</c> when set, otherwise <c>/repository/{MavenRepository.Name}</c>.
     /// </summary>
     public string? Path { get; set; }
 

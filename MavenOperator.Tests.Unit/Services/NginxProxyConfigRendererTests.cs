@@ -167,6 +167,22 @@ public sealed class NginxProxyConfigRendererTests
         result.Length.ShouldBeGreaterThan(200);
         result.Length.ShouldBeLessThan(64_000);
     }
+
+    [Fact]
+    public void RenderProxy_UsesCustomPathPrefix_WhenConfigured()
+    {
+        var result = _sut.RenderProxy(
+            "central",
+            AuthPolicy.Anonymous,
+            UpstreamUrl,
+            "1d",
+            "",
+            pathPrefix: "/");
+
+        result.ShouldContain("location /");
+        result.ShouldContain("rewrite ^/(.*)$ /maven2/$1 break;");
+        result.ShouldNotContain("/repository/central/");
+    }
 }
 
 

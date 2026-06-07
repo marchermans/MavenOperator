@@ -74,5 +74,30 @@ public sealed class GatewayApiServiceTests
 
         firstRule.ContainsKey("filters").ShouldBeFalse();
     }
+
+    [Fact]
+    public void BuildHttpRoute_UsesRepositoryPathPrefix_WhenGatewayPathMissing()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+        };
+
+        var result = sut.BuildHttpRoute(
+            "repo-route",
+            "default",
+            "repo-svc",
+            80,
+            gatewaySpec,
+            "repo",
+            "/");
+
+        var spec = result["spec"].ShouldBeOfType<Dictionary<string, object?>>();
+        var rules = spec["rules"].ShouldBeOfType<List<Dictionary<string, object?>>>();
+        var matches = rules.Single()["matches"].ShouldBeOfType<Dictionary<string, object?>[]>();
+        var path = matches.Single()["path"].ShouldBeOfType<Dictionary<string, string>>();
+        path["value"].ShouldBe("/");
+    }
 }
 

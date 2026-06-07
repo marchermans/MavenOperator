@@ -15,6 +15,13 @@ public sealed class MavenRepositorySpec
     public RepositoryType Type { get; set; } = RepositoryType.Hosted;
 
     /// <summary>
+    /// Base URL path prefix served by this repository, for example <c>/repository/releases</c>
+    /// or <c>/</c> to serve directly from the host root.
+    /// Defaults to <c>/repository/{MavenRepository.Name}</c> when omitted.
+    /// </summary>
+    public string? PathPrefix { get; set; }
+
+    /// <summary>
     /// Storage configuration. Required when Type == Hosted, forbidden otherwise.
     /// </summary>
     public StorageSpec? Storage { get; set; }

@@ -78,4 +78,17 @@ public sealed class NginxConfigRendererTests
         Should.Throw<ArgumentException>(() =>
             _sut.RenderHosted(string.Empty, AuthPolicy.Anonymous, AuthPolicy.Authenticated));
     }
+
+    [Fact]
+    public void RenderHosted_UsesCustomPathPrefix_WhenConfigured()
+    {
+        var result = _sut.RenderHosted(
+            "public",
+            AuthPolicy.Anonymous,
+            AuthPolicy.Authenticated,
+            pathPrefix: "/");
+
+        result.ShouldContain("location /");
+        result.ShouldNotContain("location /repository/public/");
+    }
 }

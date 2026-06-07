@@ -135,7 +135,8 @@ public sealed class ImportJobBuilder(
         {
             // HTTP fallback — need service URL
             var targetSvc = $"{target.Metadata.Name}-svc";
-            envs.Add(Env("TARGET_HTTP_URL", $"http://{targetSvc}/repository/{target.Metadata.Name}"));
+            var targetPathPrefix = RepositoryPathHelper.ResolvePathPrefix(target.Spec, target.Metadata.Name!);
+            envs.Add(Env("TARGET_HTTP_URL", RepositoryPathHelper.BuildInternalRepositoryUrl(targetSvc, targetPathPrefix)));
         }
 
         if (source.PvcSnapshot is not null || source.PvcLive is not null)

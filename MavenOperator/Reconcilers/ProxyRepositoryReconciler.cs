@@ -47,6 +47,7 @@ public sealed class ProxyRepositoryReconciler(
         var name = entity.Metadata.Name!;
         var ns   = entity.Metadata.NamespaceProperty!;
         var spec = entity.Spec;
+        var repositoryPathPrefix = RepositoryPathHelper.ResolvePathPrefix(spec, name);
 
         if (spec.Upstream is null)
             throw new InvalidOperationException(
@@ -99,7 +100,8 @@ public sealed class ProxyRepositoryReconciler(
             spec.Upstream.CacheTtl,
             upstreamAuthHeader,
             spec.Metrics,
-            downloadUsesAuthProxy);
+            downloadUsesAuthProxy,
+            repositoryPathPrefix);
 
         var configMapName = $"{name}-nginx-cm";
         await resources.EnsureConfigMapAsync(entity, configMapName,
@@ -169,7 +171,7 @@ public sealed class ProxyRepositoryReconciler(
 
             entity.Status.SetCondition("IngressReady", isTrue: true,
                 reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
-            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var ingressPath = spec.Ingress.Path ?? repositoryPathPrefix;
             var hasTls = spec.Ingress.TlsSecretRef is not null || spec.Ingress.CertManager?.AutoCreate == true;
             var scheme = hasTls ? "https" : "http";
             entity.Status.Url = spec.Ingress.Host is not null
@@ -190,7 +192,7 @@ public sealed class ProxyRepositoryReconciler(
                     reason: "HTTPRouteEnsured", message: $"HTTPRoute for hostname '{spec.Gateway.Hostname}' ensured");
             }
 
-            var gatewayPath = spec.Gateway.Path ?? $"/repository/{name}";
+            var gatewayPath = spec.Gateway.Path ?? repositoryPathPrefix;
             var tls = !string.IsNullOrWhiteSpace(spec.Gateway.TlsSecretRef) || spec.Gateway.CertManager?.AutoCreate == true;
             var scheme = tls ? "https" : "http";
             entity.Status.Url = spec.Gateway.Hostname is not null
@@ -199,7 +201,7 @@ public sealed class ProxyRepositoryReconciler(
         }
         else
         {
-            entity.Status.Url = $"http://{name}-svc/repository/{name}";
+            entity.Status.Url = RepositoryPathHelper.BuildInternalRepositoryUrl($"{name}-svc", repositoryPathPrefix);
         }
 
         // 7 ── Cleanup resources no longer required by spec ────────────────────

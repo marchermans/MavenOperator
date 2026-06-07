@@ -239,5 +239,33 @@ public sealed class IngressSpecTests
             Arg.Any<string>(),
             Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task Reconciler_UsesPathPrefix_ForInternalStatusUrl_WhenIngressDisabled()
+    {
+        var (reconciler, _) = BuildReconcilerWithMocks();
+        var entity = new MavenRepositoryV1Alpha1
+        {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind       = "MavenRepository",
+            Metadata   = new V1ObjectMeta { Name = "repo-root", NamespaceProperty = "test-ns" },
+            Spec = new MavenRepositorySpec
+            {
+                Type = RepositoryType.Hosted,
+                PathPrefix = "/",
+                Storage = new StorageSpec { Size = "1Gi", DeletionPolicy = DeletionPolicy.Delete },
+                Auth = new AuthSpec
+                {
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                },
+                Ingress = new IngressSpec { Enabled = false },
+            },
+        };
+
+        await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        entity.Status.Url.ShouldBe("http://repo-root-svc");
+    }
 }
 

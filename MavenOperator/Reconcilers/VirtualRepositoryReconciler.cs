@@ -34,6 +34,8 @@ public sealed class VirtualRepositoryReconciler(
     ILogger<VirtualRepositoryReconciler> logger)
     : IVirtualRepositoryReconciler
 {
+    private sealed record MemberRoute(string Name, string BaseUrl);
+
     // The virtual proxy is now a separate binary (MavenOperator.VirtualProxy).
     // Read its image from the VIRTUAL_PROXY_IMAGE env-var; falls back to the published GHCR image.
     private static string ProxyImage =>
@@ -48,6 +50,7 @@ public sealed class VirtualRepositoryReconciler(
         var name = entity.Metadata.Name!;
         var ns   = entity.Metadata.NamespaceProperty!;
         var spec = entity.Spec;
+        var repositoryPathPrefix = RepositoryPathHelper.ResolvePathPrefix(spec, name);
 
         if (spec.Virtual is null)
             throw new InvalidOperationException(
@@ -65,9 +68,7 @@ public sealed class VirtualRepositoryReconciler(
         // 1 ── Resolve member Service URLs ─────────────────────────────────────
         // Each member is a MavenRepository name in the same namespace.
         // Its Service is named "<member>-svc" (created by the member's own reconciler).
-        var members = spec.Virtual.Members
-            .Select(m => new { Name = m, BaseUrl = $"http://{m}-svc/repository/{m}" })
-            .ToList();
+        var members = await ResolveMemberBaseUrlsAsync(spec.Virtual.Members, ns, ct);
 
         // 2 ── Download htpasswd Secret ────────────────────────────────────────
         var downloadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Download, ns, ct);
@@ -109,7 +110,7 @@ public sealed class VirtualRepositoryReconciler(
         await resources.EnsureServiceAsync(entity, $"{name}-proxy-svc", proxyDeplName, ProxyPort, ct);
 
         // 6 ── NGINX ConfigMap (auth_basic front + proxy_pass to C# proxy) ─────
-        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy);
+        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, repositoryPathPrefix);
         var nginxCmName   = $"{name}-nginx-cm";
 
         await resources.EnsureConfigMapAsync(entity, nginxCmName,
@@ -141,7 +142,7 @@ public sealed class VirtualRepositoryReconciler(
 
             entity.Status.SetCondition("IngressReady", isTrue: true,
                 reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
-            var ingressPath = spec.Ingress.Path ?? $"/repository/{name}";
+            var ingressPath = spec.Ingress.Path ?? repositoryPathPrefix;
             var hasTls = spec.Ingress.TlsSecretRef is not null || spec.Ingress.CertManager?.AutoCreate == true;
             var scheme = hasTls ? "https" : "http";
             entity.Status.Url = spec.Ingress.Host is not null
@@ -162,7 +163,7 @@ public sealed class VirtualRepositoryReconciler(
                     reason: "HTTPRouteEnsured", message: $"HTTPRoute for hostname '{spec.Gateway.Hostname}' ensured");
             }
 
-            var gatewayPath = spec.Gateway.Path ?? $"/repository/{name}";
+            var gatewayPath = spec.Gateway.Path ?? repositoryPathPrefix;
             var tls = !string.IsNullOrWhiteSpace(spec.Gateway.TlsSecretRef) || spec.Gateway.CertManager?.AutoCreate == true;
             var scheme = tls ? "https" : "http";
             entity.Status.Url = spec.Gateway.Hostname is not null
@@ -171,7 +172,7 @@ public sealed class VirtualRepositoryReconciler(
         }
         else
         {
-            entity.Status.Url = $"http://{name}-svc/repository/{name}";
+            entity.Status.Url = RepositoryPathHelper.BuildInternalRepositoryUrl($"{name}-svc", repositoryPathPrefix);
         }
 
         // 10 ── Cleanup resources no longer required by spec ───────────────────
@@ -251,7 +252,7 @@ public sealed class VirtualRepositoryReconciler(
     /// - Rejects PUT/DELETE with 405
     /// - Proxies all GET/HEAD to the C# aggregation proxy
     /// </summary>
-    private static string RenderNginxVirtualConfig(string name, AuthPolicy downloadPolicy)
+    private static string RenderNginxVirtualConfig(string name, AuthPolicy downloadPolicy, string repositoryPathPrefix)
     {
         var authBlock = downloadPolicy == AuthPolicy.Authenticated
             ? $"""
@@ -259,6 +260,11 @@ public sealed class VirtualRepositoryReconciler(
                   auth_basic_user_file {AuthPath}/download.htpasswd;
               """
             : "  # anonymous download — no auth required";
+
+        var locationPrefix = RepositoryPathHelper.ToLocationPrefix(repositoryPathPrefix);
+        var regexPrefix = locationPrefix == "/"
+            ? "/"
+            : System.Text.RegularExpressions.Regex.Escape(locationPrefix);
 
         return $$"""
             server {
@@ -272,16 +278,16 @@ public sealed class VirtualRepositoryReconciler(
                 }
 
                 # Block everything except GET/HEAD — Virtual repositories are read-only.
-                location ~ ^/repository/{{name}}/ {
+                location ~ ^{{regexPrefix}} {
                     if ($request_method !~ ^(GET|HEAD)$) {
                         return 405;
                     }
 
             {{authBlock}}
 
-                    # Strip the /repository/<name>/ prefix before forwarding to the C# proxy.
+                    # Strip the repository path prefix before forwarding to the C# proxy.
                     # The proxy expects bare artifact paths (e.g. "com/example/foo/1.0/foo-1.0.jar").
-                    rewrite ^/repository/{{name}}/(.*)$ /$1 break;
+                    rewrite ^{{regexPrefix}}(.*)$ /$1 break;
 
                     proxy_pass         http://{{name}}-proxy-svc:{{ProxyPort}};
                     proxy_http_version 1.1;
@@ -291,6 +297,28 @@ public sealed class VirtualRepositoryReconciler(
                 }
             }
             """;
+    }
+
+    private async Task<List<MemberRoute>> ResolveMemberBaseUrlsAsync(
+        IEnumerable<string> memberNames,
+        string ns,
+        CancellationToken ct)
+    {
+        var resolvedMembers = new List<MemberRoute>();
+
+        foreach (var memberName in memberNames)
+        {
+            var memberRepo = await k8s.GetAsync<MavenRepositoryV1Alpha1>(memberName, ns, ct);
+            var memberPathPrefix = memberRepo is null
+                ? RepositoryPathHelper.ResolvePathPrefix(configuredPathPrefix: null, memberName)
+                : RepositoryPathHelper.ResolvePathPrefix(memberRepo.Spec, memberName);
+
+            resolvedMembers.Add(new MemberRoute(
+                memberName,
+                RepositoryPathHelper.BuildInternalRepositoryUrl($"{memberName}-svc", memberPathPrefix)));
+        }
+
+        return resolvedMembers;
     }
 
     private static V1PodSpec BuildProxyPodSpec(string name, MavenRepositorySpec spec)

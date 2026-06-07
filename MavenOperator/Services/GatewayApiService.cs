@@ -16,7 +16,8 @@ public interface IGatewayApiService
         string serviceName,
         int servicePort,
         GatewaySpec gatewaySpec,
-        string repositoryName);
+        string repositoryName,
+        string? defaultPathPrefix = null);
 
     /// <summary>
     /// Builds a CertManager Certificate resource structure as a dictionary.
@@ -47,9 +48,10 @@ public sealed class GatewayApiService : IGatewayApiService
         string serviceName,
         int servicePort,
         GatewaySpec gatewaySpec,
-        string repositoryName)
+        string repositoryName,
+        string? defaultPathPrefix = null)
     {
-        var path = gatewaySpec.Path ?? $"/repository/{repositoryName}";
+        var path = gatewaySpec.Path ?? RepositoryPathHelper.ResolvePathPrefix(defaultPathPrefix, repositoryName);
         var gatewayNamespace = gatewaySpec.GatewayRef.Namespace ?? @namespace;
 
         var hostnames = new List<string>();

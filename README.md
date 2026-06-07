@@ -331,6 +331,43 @@ WebDAV (PUT/DELETE) pass-through on Hosted repos.
 
 ---
 
+### Custom repository path prefix
+
+By default, repositories are served under `/repository/<name>`. You can override
+this for **Hosted**, **Proxy**, and **Virtual** repos with `spec.pathPrefix`.
+
+Example (Virtual repo served from host root path):
+
+```yaml
+apiVersion: maven.operator.io/v1alpha1
+kind: MavenRepository
+metadata:
+  name: public
+  namespace: my-repos
+spec:
+  type: Virtual
+  pathPrefix: /
+  virtual:
+    members:
+      - releases
+      - maven-central-cache
+  ingress:
+    enabled: true
+    host: maven.example.com
+```
+
+With this config, clients use:
+
+`https://maven.example.com/com/example/demo/maven-metadata.xml`
+
+instead of:
+
+`https://maven.example.com/repository/public/com/example/demo/maven-metadata.xml`
+
+You can also set nested prefixes (for example `pathPrefix: /maven/public`).
+
+---
+
 ### Using with Maven
 
 Add the repository to your `~/.m2/settings.xml`:

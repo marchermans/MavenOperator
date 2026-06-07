@@ -1,7 +1,8 @@
 ## NGINX configuration for a Hosted Maven repository.
 ## Rendered by NginxConfigRenderer using Scriban.
-## Variables: name, var_name, download_policy, upload_policy, metrics_enabled, stub_status_port, 
-##            download_auth_proxy_enabled, upload_auth_proxy_enabled
+## Variables: name, var_name, download_policy, upload_policy, metrics_enabled, stub_status_port,
+##            download_auth_proxy_enabled, upload_auth_proxy_enabled,
+##            path_prefix, location_path_prefix, path_prefix_regex
 ##
 ## 'name'     — the Kubernetes resource name, used in URL paths and auth realm strings.
 ##              May contain hyphens (e.g. "my-repo").
@@ -12,22 +13,21 @@
 
 # ── Maven coordinate extraction (http context) ─────────────────────────────
 map $uri $maven_repo_{{ var_name }} {
-    ~^/repository/(?P<repo>[^/]+)/  $repo;
-    default                          "-";
+    default "{{ name }}";
 }
 
 map $uri $maven_artifact_group_{{ var_name }} {
-    ~^/repository/[^/]+/(?P<g>(?:[^/]+/)+)[^/]+/[^/]+/[^/]+$  $g;
+    ~^{{ path_prefix_regex }}(?P<g>(?:[^/]+/)+)[^/]+/[^/]+/[^/]+$  $g;
     default "-";
 }
 
 map $uri $maven_artifact_id_{{ var_name }} {
-    ~^/repository/[^/]+/(?:[^/]+/)+(?P<a>[^/]+)/[^/]+/[^/]+$  $a;
+    ~^{{ path_prefix_regex }}(?:[^/]+/)+(?P<a>[^/]+)/[^/]+/[^/]+$  $a;
     default "-";
 }
 
 map $uri $maven_artifact_version_{{ var_name }} {
-    ~^/repository/[^/]+/(?:[^/]+/)+[^/]+/(?P<v>[^/]+)/[^/]+$  $v;
+    ~^{{ path_prefix_regex }}(?:[^/]+/)+[^/]+/(?P<v>[^/]+)/[^/]+$  $v;
     default "-";
 }
 
@@ -123,7 +123,7 @@ server {
     }
     {{ end -}}
 
-    location /repository/{{ name }}/ {
+    location {{ location_path_prefix }} {
         alias /var/maven/repository/;
         autoindex on;
 

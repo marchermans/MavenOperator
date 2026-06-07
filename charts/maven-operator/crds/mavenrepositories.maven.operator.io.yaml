@@ -60,6 +60,13 @@ spec:
                   type: string
                   enum: [Hosted, Proxy, Virtual]
                   default: Hosted
+                pathPrefix:
+                  type: string
+                  nullable: true
+                  description: >
+                    Base URL path prefix served by this repository.
+                    Defaults to /repository/{name} when omitted.
+                    Set to / to serve artifacts from the host root path.
                 storage:
                   type: object
                   properties:

@@ -11,7 +11,8 @@ public interface INginxConfigRenderer
 {
     /// <summary>Renders the NGINX configuration for a Hosted repository.</summary>
     string RenderHosted(string name, AuthPolicy downloadPolicy, AuthPolicy uploadPolicy,
-        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false);
+        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false,
+        string? pathPrefix = null);
 
     /// <summary>Renders the NGINX configuration for a Proxy repository.</summary>
     string RenderProxy(
@@ -21,7 +22,8 @@ public interface INginxConfigRenderer
         string cacheTtl,
         string upstreamAuthHeader,
         MetricsSpec? metrics = null,
-        bool downloadAuthProxyEnabled = false);
+        bool downloadAuthProxyEnabled = false,
+        string? pathPrefix = null);
 
     /// <summary>
     /// Returns the content of the mtail program ConfigMap (maven.mtail).
@@ -63,10 +65,16 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
 
     /// <inheritdoc/>
     public string RenderHosted(string name, AuthPolicy downloadPolicy, AuthPolicy uploadPolicy,
-        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false)
+        MetricsSpec? metrics = null, bool downloadAuthProxyEnabled = false, bool uploadAuthProxyEnabled = false,
+        string? pathPrefix = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         metrics ??= new MetricsSpec();
+        var resolvedPathPrefix = RepositoryPathHelper.ResolvePathPrefix(pathPrefix, name);
+        var locationPathPrefix = RepositoryPathHelper.ToLocationPrefix(resolvedPathPrefix);
+        var regexPrefix = locationPathPrefix == "/"
+            ? "/"
+            : System.Text.RegularExpressions.Regex.Escape(locationPathPrefix);
 
         return HostedTemplate.Render(new
         {
@@ -81,6 +89,9 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             stub_status_port = metrics.StubStatusPort,
             download_auth_proxy_enabled = downloadAuthProxyEnabled,
             upload_auth_proxy_enabled = uploadAuthProxyEnabled,
+            path_prefix = resolvedPathPrefix,
+            location_path_prefix = locationPathPrefix,
+            path_prefix_regex = regexPrefix,
         }, member => member.Name);
     }
 
@@ -92,11 +103,17 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         string cacheTtl,
         string upstreamAuthHeader,
         MetricsSpec? metrics = null,
-        bool downloadAuthProxyEnabled = false)
+        bool downloadAuthProxyEnabled = false,
+        string? pathPrefix = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamUrl);
         metrics ??= new MetricsSpec();
+        var resolvedPathPrefix = RepositoryPathHelper.ResolvePathPrefix(pathPrefix, name);
+        var locationPathPrefix = RepositoryPathHelper.ToLocationPrefix(resolvedPathPrefix);
+        var regexPrefix = locationPathPrefix == "/"
+            ? "/"
+            : System.Text.RegularExpressions.Regex.Escape(locationPathPrefix);
 
         var uri = new Uri(upstreamUrl.TrimEnd('/'));
         var upstreamSchemeHost = $"{uri.Scheme}://{uri.Authority}";
@@ -114,6 +131,9 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             metrics_enabled       = metrics.Enabled,
             stub_status_port      = metrics.StubStatusPort,
             download_auth_proxy_enabled = downloadAuthProxyEnabled,
+            path_prefix = resolvedPathPrefix,
+            location_path_prefix = locationPathPrefix,
+            path_prefix_regex = regexPrefix,
         }, member => member.Name);
     }
 
