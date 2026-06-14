@@ -149,12 +149,6 @@ public sealed class HostedRepositoryReconciler(
         {
             await resources.EnsureIngressAsync(entity, $"{name}-ingress", $"{name}-svc", spec.Ingress, name, ct);
 
-            if (spec.Ingress.CertManager is not null)
-            {
-                await resources.EnsureCertificateAsync(
-                    entity, $"{name}-ingress-cert", spec.Ingress.Host ?? name, spec.Ingress.CertManager, ct);
-            }
-
             entity.Status.SetCondition("IngressReady", isTrue: true,
                 reason: "IngressEnsured", message: $"Ingress for host '{spec.Ingress.Host}' ensured");
             // Set URL from Ingress
@@ -170,11 +164,8 @@ public sealed class HostedRepositoryReconciler(
             var httpRouteCreated = await resources.EnsureHttpRouteAsync(
                 entity, $"{name}-route", $"{name}-svc", 80, spec.Gateway, name, ct);
 
-            if (httpRouteCreated && spec.Gateway.CertManager is not null)
+            if (httpRouteCreated)
             {
-                await resources.EnsureCertificateAsync(
-                    entity, $"{name}-cert", spec.Gateway.Hostname ?? name, spec.Gateway.CertManager, ct);
-
                 entity.Status.SetCondition("GatewayReady", isTrue: true,
                     reason: "HTTPRouteEnsured", message: $"HTTPRoute for hostname '{spec.Gateway.Hostname}' ensured");
             }
@@ -217,21 +208,13 @@ public sealed class HostedRepositoryReconciler(
         if (!spec.Ingress.Enabled)
         {
             await resources.DeleteResourceIfExistsAsync<V1Ingress>($"{name}-ingress", ns, ct);
-            // Also remove the CertManager Certificate that may have been created for the Ingress
-            await resources.DeleteCustomResourceIfExistsAsync(
-                "cert-manager.io", "v1", "certificates", $"{name}-ingress-cert", ns, ct);
         }
-
         // ── Gateway / HTTPRoute: delete if no longer enabled ──────────────────
         if (!spec.Gateway.Enabled)
         {
             await resources.DeleteCustomResourceIfExistsAsync(
                 "gateway.networking.k8s.io", "v1", "httproutes", $"{name}-route", ns, ct);
-            // Also remove the CertManager Certificate that may have been created for the Gateway
-            await resources.DeleteCustomResourceIfExistsAsync(
-                "cert-manager.io", "v1", "certificates", $"{name}-cert", ns, ct);
         }
-
         // ── Metrics: delete PodMonitor + mtail ConfigMap if no longer enabled ─
         if (!spec.Metrics.Enabled)
         {

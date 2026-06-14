@@ -224,8 +224,39 @@ public sealed class IngressTests(ClusterFixture cluster)
         ingress.ShouldNotBeNull();
         ingress.Spec!.Tls.ShouldNotBeNull();
         ingress.Spec.Tls.ShouldHaveSingleItem();
-        // CertManager auto-generates a secret named "<ingressName>-tls"
+        // cert-manager will create a secret with name "<ingressName>-tls"
         ingress.Spec.Tls[0].SecretName.ShouldBe($"{name}-ingress-tls");
+
+        // The cert-manager.io/cluster-issuer annotation must be present instead of
+        // a separate Certificate object, which avoids conflicts between repositories
+        // sharing the same domain.
+        ingress.Metadata!.Annotations.ShouldNotBeNull();
+        ingress.Metadata.Annotations.ShouldContainKey("cert-manager.io/cluster-issuer");
+        ingress.Metadata.Annotations["cert-manager.io/cluster-issuer"].ShouldBe("letsencrypt-staging");
+    }
+
+    [IntegrationFact]
+    public async Task Ingress_HasIssuerAnnotation_WhenCertManagerUsesNamespacedIssuer()
+    {
+        var name = "ingress-certmanager-issuer-test";
+        var certManager = new CertManagerSpec
+        {
+            IssuerName      = "my-issuer",
+            IsClusterIssuer = false,
+        };
+        var entity = await CreateRepoWithIngressAsync(
+            name, host: "maven.example.com", certManager: certManager);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var ingress = await cluster.Client.GetAsync<V1Ingress>(
+            $"{name}-ingress", cluster.Namespace, CancellationToken.None);
+
+        ingress.ShouldNotBeNull();
+        ingress.Metadata!.Annotations.ShouldNotBeNull();
+        ingress.Metadata.Annotations.ShouldContainKey("cert-manager.io/issuer");
+        ingress.Metadata.Annotations["cert-manager.io/issuer"].ShouldBe("my-issuer");
+        ingress.Metadata.Annotations.ShouldNotContainKey("cert-manager.io/cluster-issuer");
     }
 
     [IntegrationFact]

@@ -76,6 +76,67 @@ public sealed class GatewayApiServiceTests
     }
 
     [Fact]
+    public void BuildHttpRoute_AddsCertManagerClusterIssuerAnnotation_WhenCertManagerIsClusterIssuer()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled    = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+            CertManager = new CertManagerSpec
+            {
+                IssuerName      = "letsencrypt-prod",
+                IsClusterIssuer = true,
+            },
+        };
+
+        var result = sut.BuildHttpRoute("repo-route", "default", "repo-svc", 80, gatewaySpec, "repo");
+
+        var metadata = result["metadata"].ShouldBeOfType<Dictionary<string, object?>>();
+        var annotations = metadata["annotations"].ShouldBeOfType<Dictionary<string, string>>();
+        annotations.ShouldContainKey("cert-manager.io/cluster-issuer");
+        annotations["cert-manager.io/cluster-issuer"].ShouldBe("letsencrypt-prod");
+        annotations.ShouldNotContainKey("cert-manager.io/issuer");
+    }
+
+    [Fact]
+    public void BuildHttpRoute_AddsCertManagerIssuerAnnotation_WhenCertManagerIsNamespacedIssuer()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled    = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+            CertManager = new CertManagerSpec
+            {
+                IssuerName      = "my-issuer",
+                IsClusterIssuer = false,
+            },
+        };
+
+        var result = sut.BuildHttpRoute("repo-route", "default", "repo-svc", 80, gatewaySpec, "repo");
+
+        var metadata = result["metadata"].ShouldBeOfType<Dictionary<string, object?>>();
+        var annotations = metadata["annotations"].ShouldBeOfType<Dictionary<string, string>>();
+        annotations.ShouldContainKey("cert-manager.io/issuer");
+        annotations["cert-manager.io/issuer"].ShouldBe("my-issuer");
+        annotations.ShouldNotContainKey("cert-manager.io/cluster-issuer");
+    }
+
+    [Fact]
+    public void BuildHttpRoute_NoAnnotations_WhenNoCertManagerAndNoRouteAnnotations()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled    = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+        };
+
+        var result = sut.BuildHttpRoute("repo-route", "default", "repo-svc", 80, gatewaySpec, "repo");
+
+        var metadata = result["metadata"].ShouldBeOfType<Dictionary<string, object?>>();
+        metadata.ShouldNotContainKey("annotations");
+    }
+
+    [Fact]
     public void BuildHttpRoute_UsesRepositoryPathPrefix_WhenGatewayPathMissing()
     {
         var gatewaySpec = new GatewaySpec

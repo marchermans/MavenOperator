@@ -1,14 +1,18 @@
 using MavenOperator.Entities.Spec;
-
 namespace MavenOperator.Services;
-
 /// <summary>
-/// Generates Kubernetes Gateway API resources (HTTPRoute, Certificate) from GatewaySpec.
+/// Generates Kubernetes Gateway API resources (HTTPRoute) from GatewaySpec.
+/// TLS is handled via cert-manager annotations on the HTTPRoute rather than
+/// creating separate Certificate objects, which avoids conflicts when multiple
+/// repositories share the same domain.
 /// </summary>
 public interface IGatewayApiService
 {
     /// <summary>
     /// Builds an HTTPRoute resource structure as a dictionary suitable for CustomObjects.
+    /// When <see cref="GatewaySpec.CertManager"/> is configured, the appropriate
+    /// <c>cert-manager.io/cluster-issuer</c> or <c>cert-manager.io/issuer</c> annotation
+    /// is added automatically — no separate Certificate object is created.
     /// </summary>
     Dictionary<string, object?> BuildHttpRoute(
         string name,
@@ -18,30 +22,13 @@ public interface IGatewayApiService
         GatewaySpec gatewaySpec,
         string repositoryName,
         string? defaultPathPrefix = null);
-
-    /// <summary>
-    /// Builds a CertManager Certificate resource structure as a dictionary.
-    /// Returns null if CertManager is not configured or disabled.
-    /// </summary>
-    Dictionary<string, object?>? BuildCertificate(
-        string name,
-        string @namespace,
-        string hostname,
-        string? email,
-        CertManagerSpec certManager);
 }
-
 /// <inheritdoc/>
 public sealed class GatewayApiService : IGatewayApiService
 {
     private const string HttpRouteApiGroup = "gateway.networking.k8s.io";
     private const string HttpRouteApiVersion = "v1";
     private const string HttpRouteKind = "HTTPRoute";
-
-    private const string CertificateApiGroup = "cert-manager.io";
-    private const string CertificateApiVersion = "v1";
-    private const string CertificateKind = "Certificate";
-
     public Dictionary<string, object?> BuildHttpRoute(
         string name,
         string @namespace,
@@ -53,13 +40,11 @@ public sealed class GatewayApiService : IGatewayApiService
     {
         var path = gatewaySpec.Path ?? RepositoryPathHelper.ResolvePathPrefix(defaultPathPrefix, repositoryName);
         var gatewayNamespace = gatewaySpec.GatewayRef.Namespace ?? @namespace;
-
         var hostnames = new List<string>();
         if (!string.IsNullOrWhiteSpace(gatewaySpec.Hostname))
         {
             hostnames.Add(gatewaySpec.Hostname);
         }
-
         var labels = new Dictionary<string, string>
         {
             ["maven.operator.io/managed-by"] = repositoryName,
@@ -68,19 +53,30 @@ public sealed class GatewayApiService : IGatewayApiService
         {
             labels[kv.Key] = kv.Value;
         }
-
         var metadata = new Dictionary<string, object?>
         {
             ["name"] = name,
             ["namespace"] = @namespace,
             ["labels"] = labels,
         };
-
-        if (gatewaySpec.RouteAnnotations.Count > 0)
+        // Build annotations: cert-manager annotation is added first so user-provided
+        // RouteAnnotations can override it if needed.
+        var annotations = new Dictionary<string, string>();
+        if (gatewaySpec.CertManager is not null)
         {
-            metadata["annotations"] = new Dictionary<string, string>(gatewaySpec.RouteAnnotations);
+            var certAnnotationKey = gatewaySpec.CertManager.IsClusterIssuer
+                ? "cert-manager.io/cluster-issuer"
+                : "cert-manager.io/issuer";
+            annotations[certAnnotationKey] = gatewaySpec.CertManager.IssuerName;
         }
-
+        foreach (var kv in gatewaySpec.RouteAnnotations)
+        {
+            annotations[kv.Key] = kv.Value;
+        }
+        if (annotations.Count > 0)
+        {
+            metadata["annotations"] = annotations;
+        }
         var parentRefs = new List<Dictionary<string, object?>>
         {
             new()
@@ -89,12 +85,10 @@ public sealed class GatewayApiService : IGatewayApiService
                 ["namespace"] = gatewayNamespace,
             }
         };
-
         if (!string.IsNullOrWhiteSpace(gatewaySpec.GatewayRef.SectionName))
         {
             parentRefs[0]["sectionName"] = gatewaySpec.GatewayRef.SectionName;
         }
-
         var rules = new List<Dictionary<string, object?>>
         {
             new()
@@ -121,7 +115,6 @@ public sealed class GatewayApiService : IGatewayApiService
                 },
             },
         };
-
         if (gatewaySpec.ExtensionRefs.Count > 0)
         {
             rules[0]["filters"] = gatewaySpec.ExtensionRefs
@@ -141,19 +134,16 @@ public sealed class GatewayApiService : IGatewayApiService
                 .Cast<object?>()
                 .ToList();
         }
-
         var spec = new Dictionary<string, object?>
         {
             ["parentRefs"] = parentRefs,
             ["rules"] = rules,
         };
-
         // Add hostnames if specified
         if (hostnames.Count > 0)
         {
             spec["hostnames"] = hostnames;
         }
-
         return new Dictionary<string, object?>
         {
             ["apiVersion"] = $"{HttpRouteApiGroup}/{HttpRouteApiVersion}",
@@ -162,71 +152,4 @@ public sealed class GatewayApiService : IGatewayApiService
             ["spec"] = spec,
         };
     }
-
-    public Dictionary<string, object?>? BuildCertificate(
-        string name,
-        string @namespace,
-        string hostname,
-        string? email,
-        CertManagerSpec certManager)
-    {
-        if (certManager is null)
-        {
-            return null;
-        }
-
-        if (!certManager.AutoCreate)
-        {
-            return null;
-        }
-
-        var issuerRef = new Dictionary<string, string>
-        {
-            ["name"] = certManager.IssuerName,
-            ["kind"] = certManager.IsClusterIssuer ? "ClusterIssuer" : "Issuer",
-        };
-
-        // Secret name should match the HTTPRoute's TLS secret reference
-        var secretName = $"{name}-tls";
-
-        var labels = new Dictionary<string, string>
-        {
-            ["maven.operator.io/managed-by"] = name,
-        };
-
-        var metadata = new Dictionary<string, object?>
-        {
-            ["name"] = name,
-            ["namespace"] = @namespace,
-            ["labels"] = labels,
-        };
-
-        var spec = new Dictionary<string, object?>
-        {
-            ["secretName"] = secretName,
-            ["issuerRef"] = issuerRef,
-            ["commonName"] = hostname,
-            ["dnsNames"] = new[] { hostname },
-            ["renewBefore"] = certManager.RenewBefore,
-        };
-
-        if (!string.IsNullOrWhiteSpace(email))
-        {
-            spec["emailAddresses"] = new[] { email };
-        }
-
-        return new Dictionary<string, object?>
-        {
-            ["apiVersion"] = $"{CertificateApiGroup}/{CertificateApiVersion}",
-            ["kind"] = CertificateKind,
-            ["metadata"] = metadata,
-            ["spec"] = spec,
-        };
-    }
-
 }
-
-
-
-
-

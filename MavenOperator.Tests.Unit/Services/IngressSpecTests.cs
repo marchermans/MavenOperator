@@ -6,16 +6,15 @@ using MavenOperator.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Shouldly;
-
 namespace MavenOperator.Tests.Unit.Services;
-
 /// <summary>
-/// Unit tests for the Ingress CertManager and Annotations features.
+/// Unit tests for the Ingress CertManager annotation and Annotations features.
+/// Certificate objects are no longer created by the operator; instead cert-manager
+/// annotations are added directly to the Ingress/HTTPRoute resources.
 /// </summary>
 public sealed class IngressSpecTests
 {
     // ── Helpers ───────────────────────────────────────────────────────────────
-
     private static MavenRepositoryV1Alpha1 BuildHostedEntity(
         string name,
         IngressSpec ingress)
@@ -36,7 +35,6 @@ public sealed class IngressSpecTests
                 Ingress = ingress,
             },
         };
-
     private static (HostedRepositoryReconciler reconciler, IKubernetesResourceManager resources)
         BuildReconcilerWithMocks()
     {
@@ -44,7 +42,6 @@ public sealed class IngressSpecTests
         var k8s       = Substitute.For<KubeOps.KubernetesClient.IKubernetesClient>();
         var events    = Substitute.For<IKubernetesEventService>();
         var nginx     = new NginxConfigRenderer();
-
         // Wire up common mocks
         resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
@@ -67,10 +64,6 @@ public sealed class IngressSpecTests
         resources.EnsureIngressAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<IngressSpec>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new V1Ingress());
-        resources.EnsureCertificateAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<CertManagerSpec>(), Arg.Any<CancellationToken>())
-            .Returns(true);
-
         var reconciler = new HostedRepositoryReconciler(
             k8s,
             resources,
@@ -80,14 +73,11 @@ public sealed class IngressSpecTests
             nginx,
             events,
             NullLogger<HostedRepositoryReconciler>.Instance);
-
         return (reconciler, resources);
     }
-
-    // ── CertManager tests ─────────────────────────────────────────────────────
-
+    // ── CertManager annotation tests ──────────────────────────────────────────
     [Fact]
-    public async Task Reconciler_CallsEnsureCertificate_WhenIngressCertManagerConfigured()
+    public async Task Reconciler_CallsEnsureIngress_WithCertManagerSpec_WhenCertManagerConfigured()
     {
         var (reconciler, resources) = BuildReconcilerWithMocks();
         var certManager = new CertManagerSpec
@@ -101,19 +91,19 @@ public sealed class IngressSpecTests
             Host        = "maven.example.com",
             CertManager = certManager,
         });
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
-        await resources.Received(1).EnsureCertificateAsync(
+        // EnsureIngressAsync receives the IngressSpec with CertManager set;
+        // the implementation adds the cert-manager.io/cluster-issuer annotation internally.
+        await resources.Received(1).EnsureIngressAsync(
             entity,
-            "repo-cert-ingress-cert",
-            "maven.example.com",
-            certManager,
+            "repo-cert-ingress",
+            "repo-cert-svc",
+            Arg.Is<IngressSpec>(s => s.CertManager != null && s.CertManager.IssuerName == "letsencrypt-staging"),
+            "repo-cert",
             Arg.Any<CancellationToken>());
     }
-
     [Fact]
-    public async Task Reconciler_DoesNotCallEnsureCertificate_WhenIngressCertManagerIsNull()
+    public async Task Reconciler_CallsEnsureIngress_WithNoCertManagerSpec_WhenCertManagerIsNull()
     {
         var (reconciler, resources) = BuildReconcilerWithMocks();
         var entity = BuildHostedEntity("repo-no-cert", new IngressSpec
@@ -123,14 +113,15 @@ public sealed class IngressSpecTests
             TlsSecretRef = "my-tls-secret",
             CertManager  = null,
         });
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
-        await resources.DidNotReceive().EnsureCertificateAsync(
-            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<CertManagerSpec>(), Arg.Any<CancellationToken>());
+        await resources.Received(1).EnsureIngressAsync(
+            entity,
+            "repo-no-cert-ingress",
+            "repo-no-cert-svc",
+            Arg.Is<IngressSpec>(s => s.CertManager == null && s.TlsSecretRef == "my-tls-secret"),
+            "repo-no-cert",
+            Arg.Any<CancellationToken>());
     }
-
     [Fact]
     public async Task Reconciler_SetsHttpsScheme_WhenIngressCertManagerConfigured()
     {
@@ -142,12 +133,9 @@ public sealed class IngressSpecTests
             Path        = "/repository/releases",
             CertManager = new CertManagerSpec { IssuerName = "letsencrypt", AutoCreate = true },
         });
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
         entity.Status.Url.ShouldBe("https://maven.example.com/repository/releases");
     }
-
     [Fact]
     public async Task Reconciler_SetsHttpScheme_WhenNoTlsConfigured()
     {
@@ -158,37 +146,10 @@ public sealed class IngressSpecTests
             Host    = "maven.example.com",
             Path    = "/repository/releases",
         });
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
         entity.Status.Url.ShouldBe("http://maven.example.com/repository/releases");
     }
-
-    [Fact]
-    public async Task Reconciler_UsesFallbackHostname_WhenHostIsNull_ForCertificate()
-    {
-        var (reconciler, resources) = BuildReconcilerWithMocks();
-        var certManager = new CertManagerSpec { IssuerName = "letsencrypt" };
-        var entity = BuildHostedEntity("repo-no-host", new IngressSpec
-        {
-            Enabled     = true,
-            Host        = null,
-            CertManager = certManager,
-        });
-
-        await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
-        // Falls back to repo name when host is null
-        await resources.Received(1).EnsureCertificateAsync(
-            entity,
-            "repo-no-host-ingress-cert",
-            "repo-no-host",
-            certManager,
-            Arg.Any<CancellationToken>());
-    }
-
     // ── Annotations tests ─────────────────────────────────────────────────────
-
     [Fact]
     public async Task Reconciler_PassesAnnotations_InIngressSpec_ToEnsureIngress()
     {
@@ -205,9 +166,7 @@ public sealed class IngressSpecTests
             Annotations = annotations,
         };
         var entity = BuildHostedEntity("repo-annotated", ingressSpec);
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
         // Verify EnsureIngressAsync is called with the spec that carries annotations
         await resources.Received(1).EnsureIngressAsync(
             entity,
@@ -217,7 +176,6 @@ public sealed class IngressSpecTests
             "repo-annotated",
             Arg.Any<CancellationToken>());
     }
-
     [Fact]
     public async Task Reconciler_WorksCorrectly_WhenAnnotationsAreEmpty()
     {
@@ -228,9 +186,7 @@ public sealed class IngressSpecTests
             Host        = "maven.example.com",
             Annotations = new Dictionary<string, string>(),
         });
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
         await resources.Received(1).EnsureIngressAsync(
             entity,
             "repo-no-annotations-ingress",
@@ -239,7 +195,6 @@ public sealed class IngressSpecTests
             Arg.Any<string>(),
             Arg.Any<CancellationToken>());
     }
-
     [Fact]
     public async Task Reconciler_UsesPathPrefix_ForInternalStatusUrl_WhenIngressDisabled()
     {
@@ -262,10 +217,7 @@ public sealed class IngressSpecTests
                 Ingress = new IngressSpec { Enabled = false },
             },
         };
-
         await reconciler.ReconcileAsync(entity, CancellationToken.None);
-
         entity.Status.Url.ShouldBe("http://repo-root-svc");
     }
 }
-

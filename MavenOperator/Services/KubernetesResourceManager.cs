@@ -101,18 +101,6 @@ public interface IKubernetesResourceManager
         CancellationToken ct);
 
     /// <summary>
-    /// Ensures a CertManager Certificate exists for the given hostname.
-    /// Creates or updates the Certificate based on the provided CertManagerSpec.
-    /// Returns false when CertManager CRD is not installed or CertManager is not configured.
-    /// </summary>
-    Task<bool> EnsureCertificateAsync(
-        MavenRepositoryV1Alpha1 owner,
-        string certificateName,
-        string hostname,
-        CertManagerSpec certManager,
-        CancellationToken ct);
-
-    /// <summary>
     /// Ensures a Prometheus PodMonitor exists for repository pod scraping.
     /// Returns false when the PodMonitor CRD is not installed on the target cluster.
     /// </summary>
@@ -648,6 +636,26 @@ public sealed class KubernetesResourceManager(
         return true;
     }
 
+    private static Dictionary<string, string>? BuildIngressAnnotations(IngressSpec ingressSpec)
+    {
+        var annotations = new Dictionary<string, string>();
+
+        if (ingressSpec.CertManager is not null)
+        {
+            var certAnnotationKey = ingressSpec.CertManager.IsClusterIssuer
+                ? "cert-manager.io/cluster-issuer"
+                : "cert-manager.io/issuer";
+            annotations[certAnnotationKey] = ingressSpec.CertManager.IssuerName;
+        }
+
+        foreach (var kv in ingressSpec.Annotations)
+        {
+            annotations[kv.Key] = kv.Value;
+        }
+
+        return annotations.Count == 0 ? null : annotations;
+    }
+
     // ── Ingress ───────────────────────────────────────────────────────────────
 
     public async Task<V1Ingress> EnsureIngressAsync(
@@ -662,11 +670,12 @@ public sealed class KubernetesResourceManager(
         var defaultPathPrefix = RepositoryPathHelper.ResolvePathPrefix(owner.Spec, repositoryName);
         var path = ingressSpec.Path ?? defaultPathPrefix;
         var host = ingressSpec.Host ?? string.Empty;
+        var desiredAnnotations = BuildIngressAnnotations(ingressSpec);
 
         // Determine the TLS secret name:
         // - Explicit TlsSecretRef takes priority.
-        // - When CertManager is configured AutoCreate creates a Certificate resource
-        //   whose secretName is "<ingressName>-tls".
+        // - When CertManager is configured, cert-manager manages the TLS secret via
+        //   ingress annotations and uses the conventional secret name "<ingressName>-tls".
         var effectiveTlsSecretRef = ingressSpec.TlsSecretRef
             ?? (ingressSpec.CertManager?.AutoCreate == true ? $"{ingressName}-tls" : null);
 
@@ -678,8 +687,10 @@ public sealed class KubernetesResourceManager(
             var existingPath = existing.Spec?.Rules?.FirstOrDefault()?.Http?.Paths?.FirstOrDefault()?.Path ?? string.Empty;
             var existingTlsSecret = existing.Spec?.Tls?.FirstOrDefault()?.SecretName ?? string.Empty;
             var desiredTlsSecret = effectiveTlsSecretRef ?? string.Empty;
+            var existingAnnotations = existing.Metadata?.Annotations;
 
-            if (existingHost == host && existingPath == path && existingTlsSecret == desiredTlsSecret)
+            if (existingHost == host && existingPath == path && existingTlsSecret == desiredTlsSecret &&
+                MapsEqual(existingAnnotations, desiredAnnotations))
             {
                 logger.LogDebug("Ingress {Namespace}/{Name} already exists with matching configuration", ns, ingressName);
                 return existing;
@@ -735,14 +746,7 @@ public sealed class KubernetesResourceManager(
             : null;
 
         var meta = BuildMeta(ingressName, ns, owner, setOwnerReference: true);
-        if (ingressSpec.Annotations.Count > 0)
-        {
-            meta.Annotations ??= new Dictionary<string, string>();
-            foreach (var kv in ingressSpec.Annotations)
-            {
-                meta.Annotations[kv.Key] = kv.Value;
-            }
-        }
+        meta.Annotations = desiredAnnotations;
 
         var ingress = new V1Ingress
         {
@@ -930,85 +934,6 @@ public sealed class KubernetesResourceManager(
                 "Missing RBAC to manage HTTPRoute {Namespace}/{Name}; skipping HTTPRoute creation",
                 ns,
                 routeName);
-            return false;
-        }
-    }
-
-    // ── CertManager Certificate ────────────────────────────────────────────────
-
-    public async Task<bool> EnsureCertificateAsync(
-        MavenRepositoryV1Alpha1 owner,
-        string certificateName,
-        string hostname,
-        CertManagerSpec certManager,
-        CancellationToken ct)
-    {
-        if (kubernetes is null)
-        {
-            logger.LogDebug(
-                "Raw Kubernetes client unavailable; skipping Certificate {Name}",
-                certificateName);
-            return false;
-        }
-
-        if (!certManager.AutoCreate)
-        {
-            logger.LogDebug("CertManager AutoCreate=false; skipping Certificate {Name}", certificateName);
-            return false;
-        }
-
-        var ns = owner.Metadata.NamespaceProperty!;
-        var gatewayApiService = new GatewayApiService();
-        var certificate = gatewayApiService.BuildCertificate(
-            certificateName,
-            ns,
-            hostname,
-            certManager.Email,
-            certManager);
-
-        if (certificate is null)
-        {
-            return false;
-        }
-
-        var certificateJson = System.Text.Json.JsonSerializer.Serialize(certificate);
-        var patch = new V1Patch(certificateJson, V1Patch.PatchType.ApplyPatch);
-
-        const string certManagerApiGroup = "cert-manager.io";
-        const string certManagerApiVersion = "v1";
-        const string certificatePlural = "certificates";
-
-        try
-        {
-            await kubernetes.CustomObjects.PatchNamespacedCustomObjectAsync(
-                patch,
-                certManagerApiGroup,
-                certManagerApiVersion,
-                ns,
-                certificatePlural,
-                certificateName,
-                fieldManager: FieldManager,
-                force: true,
-                cancellationToken: ct);
-
-            logger.LogInformation("Ensured Certificate {Namespace}/{Name}", ns, certificateName);
-            return true;
-        }
-        catch (HttpOperationException ex) when (IsNotFound(ex))
-        {
-            logger.LogDebug(
-                "CertManager CRD unavailable on cluster; skipping Certificate {Namespace}/{Name}",
-                ns,
-                certificateName);
-            return false;
-        }
-        catch (HttpOperationException ex) when (IsForbidden(ex))
-        {
-            logger.LogWarning(
-                ex,
-                "Missing RBAC to manage Certificate {Namespace}/{Name}; skipping Certificate creation",
-                ns,
-                certificateName);
             return false;
         }
     }

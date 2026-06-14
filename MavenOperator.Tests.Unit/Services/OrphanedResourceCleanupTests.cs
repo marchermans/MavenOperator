@@ -44,8 +44,6 @@ public sealed class OrphanedResourceCleanupTests
             .ReturnsForAnyArgs(new V1Ingress());
         resources.EnsureHttpRouteAsync(default!, default!, default!, default, default!, default!, default)
             .ReturnsForAnyArgs(false);
-        resources.EnsureCertificateAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(false);
         resources.EnsurePodMonitorAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(false);
         return resources;
