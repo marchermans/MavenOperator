@@ -674,10 +674,14 @@ public sealed class KubernetesResourceManager(
 
         // Determine the TLS secret name:
         // - Explicit TlsSecretRef takes priority.
-        // - When CertManager is configured, cert-manager manages the TLS secret via
-        //   ingress annotations and uses the conventional secret name "<ingressName>-tls".
+        // - When CertManager is configured, use CertManager.SecretName if explicitly set;
+        //   otherwise fall back to the conventional auto-generated "<ingressName>-tls" name.
+        //   Specifying SecretName is useful when multiple repositories share the same hostname
+        //   and therefore the same TLS certificate Secret.
         var effectiveTlsSecretRef = ingressSpec.TlsSecretRef
-            ?? (ingressSpec.CertManager?.AutoCreate == true ? $"{ingressName}-tls" : null);
+            ?? (ingressSpec.CertManager is not null
+                ? ingressSpec.CertManager.SecretName ?? $"{ingressName}-tls"
+                : null);
 
         var existing = await client.GetAsync<V1Ingress>(ingressName, ns, ct);
         if (existing is not null)

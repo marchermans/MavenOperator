@@ -368,11 +368,18 @@ spec:
                       type: object
                       additionalProperties:
                         type: string
-                      description: Extra labels merged into the generated HTTPRoute metadata.
-                    routeAnnotations:
-                      type: object
-                      additionalProperties:
-                        type: string
+                         autoCreate:
+                           type: boolean
+                           default: true
+                           description: Whether to automatically create the Certificate resource if it doesn't exist.
+                         secretName:
+                           type: string
+                           nullable: true
+                           description: >
+                             Explicit name of the TLS Secret that CertManager should create or reference.
+                             When set, this name is used instead of the auto-generated secret name.
+                             Useful when multiple repositories share the same hostname and certificate.
+                     routeLabels:
                       description: Extra annotations merged into the generated HTTPRoute metadata.
                     extensionRefs:
                       type: array

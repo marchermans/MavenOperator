@@ -182,6 +182,47 @@ public sealed class KubernetesResourceManagerIngressTests
             Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task EnsureIngressAsync_UsesExplicitSecretName_WhenCertManagerSecretNameSet()
+    {
+        var client = Substitute.For<IKubernetesClient>();
+        var sut = new KubernetesResourceManager(client, NullLogger<KubernetesResourceManager>.Instance);
+        var owner = BuildHostedEntity("repo", "test-ns");
+        var ingressSpec = new IngressSpec
+        {
+            Enabled = true,
+            Host = "maven.example.com",
+            CertManager = new CertManagerSpec
+            {
+                IssuerName = "letsencrypt-prod",
+                IsClusterIssuer = true,
+                SecretName = "shared-maven-tls",
+            },
+        };
+
+        client.GetAsync<V1Ingress>("repo-ingress", "test-ns", Arg.Any<CancellationToken>())
+            .Returns((V1Ingress?)null);
+
+        V1Ingress? createdIngress = null;
+        client.CreateAsync(Arg.Do<V1Ingress>(ing => createdIngress = ing), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.Arg<V1Ingress>());
+
+        await sut.EnsureIngressAsync(
+            owner,
+            "repo-ingress",
+            "repo-svc",
+            ingressSpec,
+            "repo",
+            CancellationToken.None);
+
+        createdIngress.ShouldNotBeNull();
+        createdIngress.Spec.ShouldNotBeNull();
+        createdIngress.Spec.Tls.ShouldNotBeNull();
+        createdIngress.Spec.Tls.ShouldHaveSingleItem();
+        // Should use the explicit secret name, not the auto-generated "<ingressName>-tls"
+        createdIngress.Spec.Tls[0].SecretName.ShouldBe("shared-maven-tls");
+    }
+
     private static MavenRepositoryV1Alpha1 BuildHostedEntity(string name, string ns)
         => new()
         {

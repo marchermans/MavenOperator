@@ -119,6 +119,14 @@ public sealed class CertManagerSpec
     /// Defaults to true.
     /// </summary>
     public bool AutoCreate { get; set; } = true;
+
+    /// <summary>
+    /// Explicit name of the TLS Secret that CertManager should create (or that already exists).
+    /// When set, this name is used in the Ingress TLS spec instead of the auto-generated
+    /// <c>&lt;ingressName&gt;-tls</c> name. Useful when multiple repositories share the same
+    /// hostname and should therefore reference the same certificate Secret.
+    /// </summary>
+    public string? SecretName { get; set; }
 }
 
 /// <summary>
