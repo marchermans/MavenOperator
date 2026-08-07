@@ -62,8 +62,17 @@ public sealed class MavenRepositoryImportController(
         {
             var jobName = $"{name}-import-job";
 
-            // Check if Job already exists
-            var existingJob = await k8s.GetAsync<V1Job>(jobName, ns, cancellationToken);
+            // Check if Job already exists (GetAsync throws on 404 for built-in resources)
+            V1Job? existingJob;
+            try
+            {
+                existingJob = await k8s.GetAsync<V1Job>(jobName, ns, cancellationToken);
+            }
+            catch (k8s.Autorest.HttpOperationException ex)
+                when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                existingJob = null;
+            }
 
             if (existingJob is not null)
             {
