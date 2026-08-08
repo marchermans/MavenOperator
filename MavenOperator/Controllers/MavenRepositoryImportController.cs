@@ -99,6 +99,11 @@ public sealed class MavenRepositoryImportController(
                     "TargetNotFound",
                     $"Target repository '{entity.Spec.TargetRepository}' not found in namespace '{ns}'");
                 entity.Status.Phase = ImportPhase.Failed;
+
+                logger.LogError(
+                    "MavenRepositoryImport {Namespace}/{Name} failed: target repository '{Target}' not found in namespace '{Namespace}'",
+                    ns, name, entity.Spec.TargetRepository, ns);
+
                 await events.PublishAsync(entity, "TargetNotFound",
                     $"Target repository '{entity.Spec.TargetRepository}' not found", type: "Warning",
                     ct: cancellationToken);
@@ -111,7 +116,12 @@ public sealed class MavenRepositoryImportController(
                 entity.Status.SetCondition("TargetAvailable", false,
                     "TargetNotReady",
                     $"Target repository '{entity.Spec.TargetRepository}' is in phase '{target.Status.Phase}' (need Ready)");
-                // Requeue until target is ready
+
+                logger.LogInformation(
+                    "Requeuing MavenRepositoryImport {Namespace}/{Name}: target repository '{Target}' is not Ready (phase={Phase}). Will retry when target becomes Ready.",
+                    ns, name, entity.Spec.TargetRepository, target.Status.Phase);
+
+                // Requeue until target is ready — this returns Failure so KubeOps requeues with backoff
                 return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
                     $"Target repository is not Ready (phase={target.Status.Phase})");
             }
@@ -131,6 +141,11 @@ public sealed class MavenRepositoryImportController(
                         $"Source PVC '{snapshot.ClaimName}' is ReadWriteOnce and currently bound to a running pod. " +
                         "Stop all pods using this PVC before importing, or use a PVC with ReadWriteMany access mode.");
                     entity.Status.Phase = ImportPhase.Failed;
+
+                    logger.LogError(
+                        "MavenRepositoryImport {Namespace}/{Name} failed: source PVC '{Pvc}' is RWO-bound to a running pod. Stop all pods using this PVC before importing.",
+                        ns, name, snapshot.ClaimName);
+
                     await events.PublishAsync(entity, "SourcePvcConflict",
                         $"Source PVC '{snapshot.ClaimName}' is RWO-bound — cannot mount for import",
                         type: "Warning", ct: cancellationToken);
