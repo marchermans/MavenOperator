@@ -2,6 +2,7 @@ using Shouldly;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using KubeOps.Abstractions.Reconciliation;
+using KubeOps.KubernetesClient;
 using MavenOperator.Controllers;
 using MavenOperator.Entities;
 using MavenOperator.Entities.Spec;
@@ -16,12 +17,18 @@ public sealed class MavenRepositoryControllerTests
     private readonly IVirtualRepositoryReconciler _virtual = Substitute.For<IVirtualRepositoryReconciler>();
     private readonly IKubernetesEventService _events = Substitute.For<IKubernetesEventService>();
     private readonly IKubernetesResourceManager _resources = Substitute.For<IKubernetesResourceManager>();
+    private readonly IKubernetesClient _k8s = Substitute.For<IKubernetesClient>();
     private readonly MavenRepositoryController _sut;
     public MavenRepositoryControllerTests()
     {
+        // UpdateStatusAsync is called after setting status — let it succeed silently.
+        _k8s.UpdateStatusAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<CancellationToken>())
+            .ReturnsForAnyArgs(Task.FromResult((MavenRepositoryV1Alpha1)null!));
+
         _sut = new MavenRepositoryController(
             _hosted, _proxy, _virtual,
             _events, _resources,
+            _k8s,
             NullLogger<MavenRepositoryController>.Instance);
     }
     [Fact]
