@@ -1,5 +1,3 @@
-using System.Net.Http;
-using System.Text.Json;
 using k8s.Models;
 using KubeOps.Abstractions.Reconciliation.Controller;
 using KubeOps.Abstractions.Rbac;
@@ -33,7 +31,6 @@ public sealed class MavenRepositoryImportController(
     IKubernetesEventService events,
     IPvcAccessChecker pvcChecker,
     IImportJobBuilder jobBuilder,
-    HttpClient httpClient,
     ILogger<MavenRepositoryImportController> logger)
     : IEntityController<MavenRepositoryImportV1Alpha1>
 {
@@ -84,7 +81,7 @@ public sealed class MavenRepositoryImportController(
             {
                 // Sync status from running/completed Job
                 await SyncJobStatusAsync(entity, existingJob, ns, cancellationToken);
-                await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+                await k8s.UpdateStatusAsync(entity, cancellationToken);
                 return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
             }
 
@@ -111,7 +108,7 @@ public sealed class MavenRepositoryImportController(
                 await events.PublishAsync(entity, "TargetNotFound",
                     $"Target repository '{entity.Spec.TargetRepository}' not found", type: "Warning",
                     ct: cancellationToken);
-                await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+                await k8s.UpdateStatusAsync(entity, cancellationToken);
                 return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
                     $"Target repository '{entity.Spec.TargetRepository}' not found");
             }
@@ -127,7 +124,7 @@ public sealed class MavenRepositoryImportController(
                     ns, name, entity.Spec.TargetRepository, target.Status.Phase);
 
                 // Requeue until target is ready — this returns Failure so KubeOps requeues with backoff
-                await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+                await k8s.UpdateStatusAsync(entity, cancellationToken);
                 return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
                     $"Target repository is not Ready (phase={target.Status.Phase})");
             }
@@ -155,7 +152,7 @@ public sealed class MavenRepositoryImportController(
                     await events.PublishAsync(entity, "SourcePvcConflict",
                         $"Source PVC '{snapshot.ClaimName}' is RWO-bound — cannot mount for import",
                         type: "Warning", ct: cancellationToken);
-                    await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+                    await k8s.UpdateStatusAsync(entity, cancellationToken);
                     return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
                         $"Source PVC '{snapshot.ClaimName}' is RWO-bound to a running pod");
                 }
@@ -223,7 +220,7 @@ public sealed class MavenRepositoryImportController(
                 $"Import Job '{job.Metadata.Name}' created (transferMode={transferMode})",
                 ct: cancellationToken);
 
-            await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+            await k8s.UpdateStatusAsync(entity, cancellationToken);
             return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
         }
         catch (Exception ex)
@@ -241,7 +238,7 @@ public sealed class MavenRepositoryImportController(
 
             try
             {
-                await PatchImportStatusAsync(entity, ns, name, cancellationToken);
+                await k8s.UpdateStatusAsync(entity, cancellationToken);
             }
             catch (Exception patchEx)
             {
@@ -425,46 +422,6 @@ public sealed class MavenRepositoryImportController(
 
         entity.Metadata.Finalizers.Remove(ImportCleanupFinalizer);
         await k8s.UpdateAsync(entity, ct);
-    }
-
-    /// <summary>
-    /// Explicitly patches the /status subresource of a MavenRepositoryImport.
-    /// KubeOps does not automatically patch status — it requires a separate API call to /status.
-    /// Uses server-side apply via direct HTTP PATCH with fieldManager for safe concurrent updates.
-    /// </summary>
-    private async Task PatchImportStatusAsync(
-        MavenRepositoryImportV1Alpha1 entity,
-        string ns,
-        string name,
-        CancellationToken ct)
-    {
-        var patch = new
-        {
-            apiVersion = "maven.operator.io/v1alpha1",
-            kind = "MavenRepositoryImport",
-            metadata = new { name, @namespace = ns },
-            status = entity.Status,
-        };
-
-        var json = JsonSerializer.Serialize(patch);
-        logger.LogDebug(
-            "Patching import status for MavenRepositoryImport {Namespace}/{Name}: {Json}",
-            ns, name, json);
-
-        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/apply-patch+yaml");
-        content.Headers.Add("X-Apply-Patch-Field-Manager", "maven-operator");
-
-        var response = await httpClient.PatchAsync(
-            $"/apis/maven.operator.io/v1alpha1/namespaces/{ns}/mavenrepositoryimports/{name}/status",
-            content, ct);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Failed to patch status for MavenRepositoryImport {ns}/{name}: " +
-                $"{response.StatusCode} - {errorBody}");
-        }
     }
 }
 
