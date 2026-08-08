@@ -61,17 +61,20 @@ public sealed class MavenRepositoryImportController(
         try
         {
             var jobName = $"{name}-import-job";
+            logger.LogInformation("Checking for existing import Job '{JobName}'", jobName);
 
             // Check if Job already exists (GetAsync throws on 404 for built-in resources)
             V1Job? existingJob;
             try
             {
                 existingJob = await k8s.GetAsync<V1Job>(jobName, ns, cancellationToken);
+                logger.LogInformation("Found existing import Job '{JobName}'", jobName);
             }
             catch (k8s.Autorest.HttpOperationException ex)
                 when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 existingJob = null;
+                logger.LogInformation("No existing import Job found for '{JobName}'", jobName);
             }
 
             if (existingJob is not null)
@@ -84,8 +87,11 @@ public sealed class MavenRepositoryImportController(
             // --- Pending → Running path ---
 
             // 1. Validate target repository
+            logger.LogInformation("Fetching target MavenRepository '{Target}'", entity.Spec.TargetRepository);
             var target = await k8s.GetAsync<MavenRepositoryV1Alpha1>(
                 entity.Spec.TargetRepository, ns, cancellationToken);
+            logger.LogInformation("Fetched target: {Name}, phase={Phase}", 
+                target?.Metadata.Name ?? "null", target?.Status.Phase.ToString() ?? "null");
 
             if (target is null)
             {
