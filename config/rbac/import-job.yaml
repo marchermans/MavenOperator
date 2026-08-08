@@ -1,0 +1,55 @@
+# ServiceAccount used by import Jobs (Phase 7).
+# Lives in the operator namespace; jobs reference it cross-namespace via "maven-operator:maven-operator-import".
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maven-operator-import
+  namespace: maven-operator
+---
+# ClusterRole granting import Jobs permission to:
+# - Scale Reposilite Deployments (Mode C)
+# - List PVCs for transfer mode resolution
+# - Patch MavenRepositoryImport CRs for progress reporting
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maven-operator-import
+rules:
+  # Mode C: scale Reposilite Deployment to 0 during import, restore after
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Transfer mode resolution: check PVC access modes and pod bindings
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Progress reporting: patch MavenRepositoryImport status annotations on the Job
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "patch"]
+
+  # Read target repository info (for HTTP transfer mode)
+  - apiGroups: ["maven.operator.io"]
+    resources: ["mavenrepositories"]
+    verbs: ["get", "list"]
+
+  # Report progress back to the import CRD
+  - apiGroups: ["maven.operator.io"]
+    resources: ["mavenrepositoryimports/status"]
+    verbs: ["patch"]
+---
+# Bind the ClusterRole to the import ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maven-operator-import
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maven-operator-import
+subjects:
+  - kind: ServiceAccount
+    name: maven-operator-import
+    namespace: maven-operator

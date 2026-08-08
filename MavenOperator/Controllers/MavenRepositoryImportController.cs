@@ -26,6 +26,8 @@ namespace MavenOperator.Controllers;
 [EntityRbac(typeof(V1Deployment),                   Verbs = RbacVerb.Get | RbacVerb.Patch | RbacVerb.Update)]
 [EntityRbac(typeof(V1PersistentVolumeClaim),        Verbs = RbacVerb.Get | RbacVerb.List)]
 [EntityRbac(typeof(V1Pod),                          Verbs = RbacVerb.List)]
+[EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.Create)]
+[EntityRbac(typeof(V1ClusterRoleBinding),           Verbs = RbacVerb.Get | RbacVerb.Create)]
 public sealed class MavenRepositoryImportController(
     IKubernetesClient k8s,
     IKubernetesEventService events,
@@ -202,6 +204,9 @@ public sealed class MavenRepositoryImportController(
             }
 
             entity.Status.TransferMode = transferMode;
+
+            // 4a. Ensure import-job ServiceAccount exists in this namespace (lazy init)
+            await EnsureImportJobServiceAccountAsync(ns, cancellationToken);
 
             // 5. Build and create the Job
             var job = await jobBuilder.BuildJobAsync(entity, target, transferMode, ImportJobImage, cancellationToken);
@@ -428,6 +433,84 @@ public sealed class MavenRepositoryImportController(
 
         entity.Metadata.Finalizers.Remove(ImportCleanupFinalizer);
         await k8s.UpdateAsync(entity, ct);
+    }
+
+    /// <summary>
+    /// Lazily creates the import-job ServiceAccount and RoleBinding in the given namespace.
+    /// This is called before creating an import Job to ensure it has a valid SA to run as.
+    /// Idempotent — safe to call every reconciliation.
+    /// </summary>
+    private async Task EnsureImportJobServiceAccountAsync(
+        string ns,
+        CancellationToken ct)
+    {
+        const string saName = "maven-operator-import";
+
+        // Check if SA already exists
+        try
+        {
+            var existing = await k8s.GetAsync<V1ServiceAccount>(saName, ns, ct);
+            if (existing is not null)
+                return; // already present
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // SA doesn't exist — create it below
+        }
+
+        logger.LogInformation(
+            "Creating import-job ServiceAccount '{SaName}' in namespace '{Namespace}'", saName, ns);
+
+        var sa = new V1ServiceAccount
+        {
+            ApiVersion = "v1",
+            Kind       = "ServiceAccount",
+            Metadata   = new V1ObjectMeta { Name = saName, NamespaceProperty = ns },
+        };
+
+        try
+        {
+            await k8s.CreateAsync(sa, ct);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            logger.LogDebug("ServiceAccount '{SaName}' already exists in namespace '{Namespace}' (race)", saName, ns);
+            return;
+        }
+
+        // Create RoleBinding to the cluster-wide ClusterRole maven-operator-import.
+        var rb = new V1RoleBinding
+        {
+            ApiVersion = "rbac.authorization.k8s.io/v1",
+            Kind       = "ClusterRoleBinding",
+            Metadata   = new V1ObjectMeta { Name = $"{saName}-{ns}" },
+            RoleRef    = new V1RoleRef
+            {
+                ApiGroup = "rbac.authorization.k8s.io",
+                Kind     = "ClusterRole",
+                Name     = saName, // matches ClusterRole name from config/rbac/import-job.yaml
+            },
+            Subjects = new List<Rbacv1Subject>
+            {
+                new()
+                {
+                    Kind              = "ServiceAccount",
+                    Name              = saName,
+                    NamespaceProperty = ns,
+                },
+            },
+        };
+
+        try
+        {
+            await k8s.CreateAsync(rb, ct);
+            logger.LogInformation(
+                "Created ClusterRoleBinding '{RbName}' for import-job SA in namespace '{Namespace}'", rb.Metadata.Name, ns);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            logger.LogDebug("ClusterRoleBinding '{RbName}' already exists (race)", rb.Metadata.Name);
+        }
     }
 }
 

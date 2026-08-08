@@ -26,6 +26,14 @@ rules:
   - apiGroups: [""]
     resources: ["services", "persistentvolumeclaims", "configmaps", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ServiceAccounts and ClusterRoleBindings for lazy-init of import-job SA per namespace
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "create"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch", "update"]
@@ -85,33 +93,39 @@ subjects:
     namespace: {{ .Release.Namespace }}
 
 ---
+# ClusterRole for import Jobs — grants permissions needed across all namespaces.
+# The operator lazily creates a ServiceAccount + ClusterRoleBinding in each namespace
+# where an import Job runs (see MavenRepositoryImportController.EnsureImportJobServiceAccountAsync).
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: {{ include "maven-operator.fullname" . }}-import-job
-  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "maven-operator.labels" . | nindent 4 }}
 rules:
+  # Mode C: scale Reposilite Deployment to 0 during import, restore after
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Transfer mode resolution: check PVC access modes and pod bindings
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["persistentvolumeclaims", "pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Progress reporting: patch Job annotations for progress tracking
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["get", "patch"]
 
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "maven-operator.fullname" . }}-import-job
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "maven-operator.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "maven-operator.fullname" . }}-import-job
-subjects:
-  - kind: ServiceAccount
-    name: {{ $importJobServiceAccountName }}
-    namespace: {{ .Release.Namespace }}
+  # Read target repository info (for HTTP transfer mode)
+  - apiGroups: ["maven.operator.io"]
+    resources: ["mavenrepositories"]
+    verbs: ["get", "list"]
+
+  # Report progress back to the import CRD
+  - apiGroups: ["maven.operator.io"]
+    resources: ["mavenrepositoryimports/status"]
+    verbs: ["patch"]
 {{- end }}
 
