@@ -123,10 +123,16 @@ public sealed class MavenRepositoryImportController(
                     "Requeuing MavenRepositoryImport {Namespace}/{Name}: target repository '{Target}' is not Ready (phase={Phase}). Will retry when target becomes Ready.",
                     ns, name, entity.Spec.TargetRepository, target.Status.Phase);
 
-                // Requeue until target is ready — this returns Failure so KubeOps requeues with backoff
+                // Persist the condition so it's visible in kubectl get.
                 await k8s.UpdateStatusAsync(entity, cancellationToken);
-                return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
+
+                // Return Failure with explicit requeue — we haven't created the Job yet,
+                // so reconciliation is incomplete. Use a fixed interval (not exponential backoff)
+                // since this is an expected wait for the target to become Ready.
+                var result = ReconciliationResult<MavenRepositoryImportV1Alpha1>.Failure(entity,
                     $"Target repository is not Ready (phase={target.Status.Phase})");
+                result.RequeueAfter = TimeSpan.FromSeconds(30);
+                return result;
             }
 
             entity.Status.SetCondition("TargetAvailable", true, "TargetReady",
