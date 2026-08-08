@@ -32,6 +32,7 @@ public sealed class DeletionPolicyTests(ClusterFixture cluster)
             Substitute.For<IVirtualRepositoryReconciler>(),
             Substitute.For<IKubernetesEventService>(),
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
+            cluster.Client,
             NullLogger<MavenRepositoryController>.Instance);
 
     private HostedRepositoryReconciler BuildHostedReconciler() =>
