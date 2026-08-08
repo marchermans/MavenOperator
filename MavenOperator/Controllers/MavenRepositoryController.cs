@@ -1,3 +1,5 @@
+using System.Net.Http;
+using System.Text.Json;
 using KubeOps.Abstractions.Reconciliation.Controller;
 using KubeOps.Abstractions.Rbac;
 using KubeOps.Abstractions.Reconciliation;
@@ -21,6 +23,7 @@ public sealed class MavenRepositoryController(
     IVirtualRepositoryReconciler virtualReconciler,
     IKubernetesEventService events,
     IKubernetesResourceManager resources,
+    HttpClient httpClient,
     ILogger<MavenRepositoryController> logger)
     : IEntityController<MavenRepositoryV1Alpha1>
 {
@@ -63,6 +66,9 @@ public sealed class MavenRepositoryController(
                 $"{entity.Spec.Type} repository '{name}' reconciled successfully",
                 ct: cancellationToken);
 
+            // Explicitly patch the status subresource — KubeOps does not auto-patch /status.
+            await PatchStatusAsync(entity, ns, name, cancellationToken);
+
             return ReconciliationResult<MavenRepositoryV1Alpha1>.Success(entity);
         }
         catch (Exception ex)
@@ -81,6 +87,16 @@ public sealed class MavenRepositoryController(
                 $"Reconciliation failed for '{name}': {ex.Message}",
                 type: "Warning",
                 ct: cancellationToken);
+
+            // Explicitly patch the status subresource — KubeOps does not auto-patch /status.
+            try
+            {
+                await PatchStatusAsync(entity, ns, name, cancellationToken);
+            }
+            catch (Exception patchEx)
+            {
+                logger.LogWarning(patchEx, "Failed to patch status for MavenRepository {Namespace}/{Name}", ns, name);
+            }
 
             // Return failure — KubeOps will requeue with exponential back-off.
             return ReconciliationResult<MavenRepositoryV1Alpha1>.Failure(entity, ex.Message, ex);
@@ -120,5 +136,48 @@ public sealed class MavenRepositoryController(
         }
 
         return ReconciliationResult<MavenRepositoryV1Alpha1>.Success(entity);
+    }
+
+    /// <summary>
+    /// Explicitly patches the /status subresource of a MavenRepository.
+    /// KubeOps does not automatically patch status — it requires a separate API call to /status.
+    /// Uses server-side apply via direct HTTP PATCH with fieldManager for safe concurrent updates.
+    /// </summary>
+    private async Task PatchStatusAsync(
+        MavenRepositoryV1Alpha1 entity,
+        string ns,
+        string name,
+        CancellationToken ct)
+    {
+        // Build a minimal JSON object containing only the status to avoid overwriting other fields
+        var patch = new
+        {
+            apiVersion = "maven.operator.io/v1alpha1",
+            kind = "MavenRepository",
+            metadata = new { name, @namespace = ns },
+            status = entity.Status,
+        };
+
+        var json = JsonSerializer.Serialize(patch);
+        logger.LogDebug(
+            "Patching status for MavenRepository {Namespace}/{Name}: {Json}",
+            ns, name, json);
+
+        // Use direct HTTP PATCH to /status subresource since CustomObjects API
+        // doesn't expose a subResource parameter on PatchNamespacedCustomObjectAsync.
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/apply-patch+yaml");
+        content.Headers.Add("X-Apply-Patch-Field-Manager", "maven-operator");
+
+        var response = await httpClient.PatchAsync(
+            $"/apis/maven.operator.io/v1alpha1/namespaces/{ns}/mavenrepositories/{name}/status",
+            content, ct);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException(
+                $"Failed to patch status for MavenRepository {ns}/{name}: " +
+                $"{response.StatusCode} - {errorBody}");
+        }
     }
 }
