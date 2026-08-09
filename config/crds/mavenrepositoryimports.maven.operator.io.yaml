@@ -118,6 +118,19 @@ spec:
                             When true, strips the leading /<repository>/ path segment
                             present in Reposilite's on-disk layout.
                             Set to false for a raw Maven-layout PVC.
+                        appRootPvcMode:
+                          type: boolean
+                          default: false
+                          description: >
+                            When true, expects the PVC to use an approot layout with multiple repositories:
+                            /<approot>/repositories/<repository>/<mavenpath>.
+                            Requires reposiliteRepositoryName to be set. Only crawls files under that repository directory.
+                        reposiliteRepositoryName:
+                          type: string
+                          nullable: true
+                          description: >
+                            Name of the Reposilite repository within an approot PVC layout (used when appRootPvcMode is true).
+                            Example: "libs-release" for /app/repositories/libs-release/com/example/...
 
                     pvcLive:
                       type: object
