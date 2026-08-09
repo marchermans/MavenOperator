@@ -43,7 +43,7 @@ public sealed class MavenRepositoryImportController(
     // Image is injected by Helm at deployment time.
     private static readonly string ImportJobImage =
         Environment.GetEnvironmentVariable("IMPORT_JOB_IMAGE")
-            ?? "ghcr.io/marchermans/maven-operator-import-job:latest";
+            ?? "ghcr.io/marchermans/maven-import-job:latest";
 
     // ClusterRole name for import jobs — configurable to support both dev and Helm deployments.
     // Dev (config/rbac/import-job.yaml): "maven-operator-import"
@@ -665,22 +665,20 @@ public sealed class MavenRepositoryImportController(
             "Ensuring imagePullSecret '{SecretName}' exists in namespace '{TargetNamespace}' (source: '{OperatorNamespace}')",
             secretName, targetNamespace, operatorNs);
 
-        // Check if already present in target namespace
-        try
+        // Check if already present in target namespace using ListAsync to avoid potential caching issues with GetAsync.
+        var allSecrets = await k8s.ListAsync<V1Secret>(targetNamespace, cancellationToken: ct);
+        var exists = allSecrets?.Any(s => s.Metadata.Name == secretName) ?? false;
+        if (exists)
         {
-            await k8s.GetAsync<V1Secret>(secretName, targetNamespace, ct);
             logger.LogInformation(
                 "imagePullSecret '{SecretName}' already exists in namespace '{TargetNamespace}' — skipping copy",
                 secretName, targetNamespace);
             return; // already exists — nothing to do
         }
-        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            logger.LogInformation(
-                "imagePullSecret '{SecretName}' not found in namespace '{TargetNamespace}' — will copy from '{OperatorNamespace}'",
-                secretName, targetNamespace, operatorNs);
-            // Not present yet — copy below
-        }
+
+        logger.LogInformation(
+            "imagePullSecret '{SecretName}' not found in namespace '{TargetNamespace}' — will copy from '{OperatorNamespace}'",
+            secretName, targetNamespace, operatorNs);
 
         // Read from operator namespace
         V1Secret source;
