@@ -229,9 +229,7 @@ spec:
                       minimum: 0
                       maximum: 65534
                       description: >
-                        Pod security context for the import Job — sets both fsGroup and runAsUser to this value.
-                        Running as uid/gid matching the source file owner allows reading files with restrictive permissions (e.g., mode 600).
-                        Default is 999 (Reposilite's uid/gid). Set explicitly when importing from sources with different ownership.
+                        Reserved for future use — currently the import Job always runs as root (uid 0) to handle arbitrary source/target permissions.
 
             status:
               type: object

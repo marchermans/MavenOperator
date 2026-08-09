@@ -83,9 +83,10 @@ public sealed class ImportJobBuilder(
                         ImagePullSecrets   = imagePullSecrets?.ToList(),
                         // fsGroup ensures the import job can read source PVC files owned by that GID with mode 660.
                         // Kubernetes adds this group to all containers, granting group-read access on source data.
-                        // fsGroup + runAsUser ensure the import job can read source PVC files regardless of restrictive permissions.
-                        // Source files may be owned by uid/gid 999 with mode 600 (no group/world read). Running as that user bypasses this.
-                        SecurityContext    = new V1PodSecurityContext { FsGroup = import.Spec.Options.FsGroup ?? 999, RunAsUser = import.Spec.Options.FsGroup ?? 999 },
+                        // Run as root to handle arbitrary source file permissions (e.g., mode 600 owned by uid/gid 999)
+                        // and target PVC directories that may be owned by a different user. Root bypasses all permission checks.
+                        // Output files are normalized to 0644/0755 by DirectPvcSink so nginx can always read them.
+                        SecurityContext    = new V1PodSecurityContext { RunAsUser = 0 },
                     },
                 },
             },
