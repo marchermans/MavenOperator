@@ -229,8 +229,8 @@ spec:
                       minimum: 0
                       maximum: 65534
                       description: >
-                        Optional fsGroup for the import Job pod security context.
-                        Kubernetes adds this group to all containers so they can read source PVC files owned by that GID.
+                        Pod security context for the import Job — sets both fsGroup and runAsUser to this value.
+                        Running as uid/gid matching the source file owner allows reading files with restrictive permissions (e.g., mode 600).
                         Default is 999 (Reposilite's uid/gid). Set explicitly when importing from sources with different ownership.
 
             status:
