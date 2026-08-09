@@ -38,7 +38,31 @@ public sealed class MavenRepositoryImportController(
 {
     private const string PreImportReplicasAnnotation = "maven.operator.io/pre-import-replicas";
     private const string ImportCleanupFinalizer      = "maven.operator.io/import-cleanup";
-    private const string ImportJobImage              = "ghcr.io/marchermans/maven-operator-import-job";
+
+    // Image and pull secrets are injected by Helm at deployment time.
+    private static readonly string ImportJobImage =
+        Environment.GetEnvironmentVariable("IMPORT_JOB_IMAGE")
+            ?? "ghcr.io/marchermans/maven-operator-import-job:latest";
+
+    private static readonly List<V1LocalObjectReference>? ImagePullSecrets = ParseImagePullSecrets();
+
+    private static List<V1LocalObjectReference>? ParseImagePullSecrets()
+    {
+        var json = Environment.GetEnvironmentVariable("IMAGE_PULL_SECRETS_JSON");
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<List<V1LocalObjectReference>>(json);
+        }
+        catch (Exception ex)
+        {
+            // Log warning but don't fail startup — jobs will run without pull secrets.
+            Console.WriteLine($"[WARN] Failed to parse IMAGE_PULL_SECRETS_JSON: {ex.Message}");
+            return null;
+        }
+    }
 
     public async Task<ReconciliationResult<MavenRepositoryImportV1Alpha1>> ReconcileAsync(
         MavenRepositoryImportV1Alpha1 entity,
@@ -208,7 +232,7 @@ public sealed class MavenRepositoryImportController(
             // 4a. Ensure import-job ServiceAccount exists in this namespace (lazy init)
             await EnsureImportJobServiceAccountAsync(ns, cancellationToken);
 
-            // 5. Build and create the Job
+            // 5. Build and create the Job (imagePullSecrets come from SA)
             var job = await jobBuilder.BuildJobAsync(entity, target, transferMode, ImportJobImage, cancellationToken);
 
             try
@@ -437,6 +461,7 @@ public sealed class MavenRepositoryImportController(
 
     /// <summary>
     /// Lazily creates the import-job ServiceAccount and RoleBinding in the given namespace.
+    /// Attaches imagePullSecrets (if configured) so Jobs can pull from private registries.
     /// This is called before creating an import Job to ensure it has a valid SA to run as.
     /// Idempotent — safe to call every reconciliation.
     /// </summary>
@@ -446,12 +471,19 @@ public sealed class MavenRepositoryImportController(
     {
         const string saName = "maven-operator-import";
 
-        // Check if SA already exists
+        // Check if SA already exists; update imagePullSecrets if needed
         try
         {
             var existing = await k8s.GetAsync<V1ServiceAccount>(saName, ns, ct);
             if (existing is not null)
-                return; // already present
+            {
+                if (NeedsImagePullSecretUpdate(existing))
+                {
+                    EnsureSaImagePullSecrets(existing);
+                    await PatchServiceAccountAsync(existing, ct);
+                }
+                return;
+            }
         }
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -467,6 +499,8 @@ public sealed class MavenRepositoryImportController(
             Kind       = "ServiceAccount",
             Metadata   = new V1ObjectMeta { Name = saName, NamespaceProperty = ns },
         };
+
+        EnsureSaImagePullSecrets(sa);
 
         try
         {
@@ -511,6 +545,37 @@ public sealed class MavenRepositoryImportController(
         {
             logger.LogDebug("ClusterRoleBinding '{RbName}' already exists (race)", rb.Metadata.Name);
         }
+    }
+
+    private static bool NeedsImagePullSecretUpdate(V1ServiceAccount sa) =>
+        ImagePullSecrets is not null && ImagePullSecrets.Count > 0 &&
+        !AreImagePullSecretsEqual(sa.ImagePullSecrets, ImagePullSecrets);
+
+    private static void EnsureSaImagePullSecrets(V1ServiceAccount sa)
+    {
+        if (ImagePullSecrets is not null && ImagePullSecrets.Count > 0)
+            sa.ImagePullSecrets = new List<V1LocalObjectReference>(ImagePullSecrets);
+    }
+
+    private static bool AreImagePullSecretsEqual(
+        IEnumerable<V1LocalObjectReference>? existing,
+        IEnumerable<V1LocalObjectReference> desired)
+    {
+        if (existing is null || !existing.Any())
+            return false;
+
+        var existingNames = new HashSet<string>(existing.Select(s => s.Name));
+        var desiredNames  = new HashSet<string>(desired.Select(s => s.Name));
+        return existingNames.SetEquals(desiredNames);
+    }
+
+    private async Task PatchServiceAccountAsync(V1ServiceAccount sa, CancellationToken ct)
+    {
+        logger.LogInformation(
+            "Patching ServiceAccount '{SaName}' in namespace '{Namespace}' with imagePullSecrets",
+            sa.Metadata.Name!, sa.Metadata.NamespaceProperty!);
+
+        await k8s.UpdateAsync(sa, ct);
     }
 }
 

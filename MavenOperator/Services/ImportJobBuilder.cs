@@ -75,9 +75,9 @@ public sealed class ImportJobBuilder(
                     },
                     Spec = new V1PodSpec
                     {
-                        RestartPolicy  = "OnFailure",
-                        Containers     = [container],
-                        Volumes        = volumes,
+                        RestartPolicy      = "OnFailure",
+                        Containers         = [container],
+                        Volumes            = volumes,
                         ServiceAccountName = ImportJobServiceAccountName,
                     },
                 },

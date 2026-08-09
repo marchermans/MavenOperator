@@ -38,6 +38,13 @@ serviceAccount:
   name: ""
 
 importJob:
+  image:
+    # -- Import-job image repository (without tag)
+    repository: ghcr.io/marchermans/maven-operator-import-job
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag; defaults to Chart.appVersion
+    tag: ""
+
   serviceAccount:
     # -- Create the ServiceAccount used by MavenRepositoryImport Jobs for in-cluster progress reporting.
     create: true

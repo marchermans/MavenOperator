@@ -68,3 +68,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s:%s" .Values.virtualProxy.image.repository $tag }}
 {{- end }}
 
+{{- define "maven-operator.importJobImage" -}}
+{{- $tag := .Values.importJob.image.tag | default .Chart.AppVersion }}
+{{- printf "%s:%s" .Values.importJob.image.repository $tag }}
+{{- end }}
+
