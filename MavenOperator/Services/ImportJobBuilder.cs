@@ -155,6 +155,15 @@ public sealed class ImportJobBuilder(
             envs.Add(Env("SOURCE_PVC_MOUNT",       SourceMountPath));
             envs.Add(Env("SOURCE_REPOSILITE_LAYOUT",
                 (source.PvcSnapshot?.ReposiliteLayout ?? true).ToString().ToLower()));
+
+            // AppRoot PVC mode settings (only for PvcSnapshot)
+            if (source.PvcSnapshot is { } snapshot && snapshot.AppRootPvcMode)
+            {
+                envs.Add(Env("SOURCE_APPROOT_PVC_MODE", "true"));
+                if (!string.IsNullOrEmpty(snapshot.ReposiliteRepositoryName))
+                    envs.Add(Env("SOURCE_REPOSILITE_REPO_NAME", snapshot.ReposiliteRepositoryName));
+            }
+
             var subPath = source.PvcSnapshot?.SubPath ?? source.PvcLive?.SubPath ?? "";
             if (!string.IsNullOrEmpty(subPath))
                 envs.Add(Env("SOURCE_SUBPATH", subPath));

@@ -114,8 +114,15 @@ switch (importMode)
     {
         var mountPath        = Env("SOURCE_PVC_MOUNT",       required: true)!;
         var reposiliteLayout = Env("SOURCE_REPOSILITE_LAYOUT", required: false) != "false";
+        var appRootPvcMode   = Env("SOURCE_APPROOT_PVC_MODE",  required: false) == "true";
+
+        // For AppRoot mode, use the explicit repository name from CRD; otherwise fall back to targetRepository.
+        var reposiliteRepoName = appRootPvcMode
+            ? Env("SOURCE_REPOSILITE_REPO_NAME", required: true)!
+            : targetRepository;
+
         source = new PvcSnapshotSource(
-            mountPath, reposiliteLayout, targetRepository,
+            mountPath, reposiliteLayout, reposiliteRepoName, appRootPvcMode,
             logFactory.CreateLogger<PvcSnapshotSource>());
         break;
     }

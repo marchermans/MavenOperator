@@ -64,6 +64,16 @@ public sealed class PvcSnapshotSourceSpec
     /// When false, treats the source as a raw Maven layout PVC.
     /// </summary>
     public bool ReposiliteLayout { get; set; } = true;
+    /// <summary>
+    /// When true, expects the PVC to use an approot layout: /&lt;approot&gt;/repositories/&lt;repository&gt;/&lt;mavenpath&gt;.
+    /// Requires ReposiliteRepositoryName to be set.
+    /// </summary>
+    public bool AppRootPvcMode { get; set; } = false;
+    /// <summary>
+    /// Name of the Reposilite repository within an approot PVC layout (used when AppRootPvcMode is true).
+    /// Example: "libs-release" for /app/repositories/libs-release/com/example/...
+    /// </summary>
+    public string? ReposiliteRepositoryName { get; set; }
 }
 
 /// <summary>Clone from a live Reposilite PVC running in the same cluster.</summary>

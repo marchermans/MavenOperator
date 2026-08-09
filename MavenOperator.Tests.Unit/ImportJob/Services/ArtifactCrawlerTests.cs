@@ -41,7 +41,7 @@ public sealed class ArtifactCrawlerTests : IDisposable
         SeedArtifact("com/example/lib/1.0/lib.jar");
         SeedArtifact("com/example/lib/1.0/lib.pom");
 
-        var source  = new PvcSnapshotSource(_sourceDir, false, null, NullLogger<PvcSnapshotSource>.Instance);
+        var source  = new PvcSnapshotSource(_sourceDir, false, null, appRootPvcMode: false, NullLogger<PvcSnapshotSource>.Instance);
         var sink    = new DirectPvcSink(_targetDir, dryRun: false, NullLogger<DirectPvcSink>.Instance);
         var options = new ImportOptions { DryRun = true };
 
@@ -59,7 +59,7 @@ public sealed class ArtifactCrawlerTests : IDisposable
         SeedArtifact("com/example/lib/1.0/lib.pom");
         SeedArtifact("com/example/lib/1.0/lib.jar.sha1");
 
-        var source  = new PvcSnapshotSource(_sourceDir, false, null, NullLogger<PvcSnapshotSource>.Instance);
+        var source  = new PvcSnapshotSource(_sourceDir, false, null, appRootPvcMode: false, NullLogger<PvcSnapshotSource>.Instance);
         var sink    = new DirectPvcSink(_targetDir, dryRun: false, NullLogger<DirectPvcSink>.Instance);
         var options = new ImportOptions { Parallelism = 2 };
 
@@ -80,7 +80,7 @@ public sealed class ArtifactCrawlerTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
         File.WriteAllText(destPath, "original-content");
 
-        var source  = new PvcSnapshotSource(_sourceDir, false, null, NullLogger<PvcSnapshotSource>.Instance);
+        var source  = new PvcSnapshotSource(_sourceDir, false, null, appRootPvcMode: false, NullLogger<PvcSnapshotSource>.Instance);
         var sink    = new DirectPvcSink(_targetDir, dryRun: false, NullLogger<DirectPvcSink>.Instance);
         var options = new ImportOptions { OverwriteExisting = false };
 
@@ -99,7 +99,7 @@ public sealed class ArtifactCrawlerTests : IDisposable
         SeedArtifact("com/example/lib/1.0/lib.jar");
         SeedArtifact("com/example/lib/1.0/lib.pom");
 
-        var source      = new PvcSnapshotSource(_sourceDir, false, null, NullLogger<PvcSnapshotSource>.Instance);
+        var source      = new PvcSnapshotSource(_sourceDir, false, null, appRootPvcMode: false, NullLogger<PvcSnapshotSource>.Instance);
         var failingSink = new FaultingOnFirstWriteSink(_targetDir);
         var options     = new ImportOptions { Parallelism = 1, OverwriteExisting = true };
 
