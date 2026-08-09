@@ -30,7 +30,7 @@ rules:
   # ServiceAccounts and ClusterRoleBindings for lazy-init of import-job SA per namespace
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["get", "create"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "create"]

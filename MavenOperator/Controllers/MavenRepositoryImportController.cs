@@ -26,7 +26,7 @@ namespace MavenOperator.Controllers;
 [EntityRbac(typeof(V1Deployment),                   Verbs = RbacVerb.Get | RbacVerb.Patch | RbacVerb.Update)]
 [EntityRbac(typeof(V1PersistentVolumeClaim),        Verbs = RbacVerb.Get | RbacVerb.List)]
 [EntityRbac(typeof(V1Pod),                          Verbs = RbacVerb.List)]
-[EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.Create)]
+[EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.List | RbacVerb.Watch | RbacVerb.Create | RbacVerb.Update | RbacVerb.Patch)]
 [EntityRbac(typeof(V1ClusterRoleBinding),           Verbs = RbacVerb.Get | RbacVerb.Create)]
 public sealed class MavenRepositoryImportController(
     IKubernetesClient k8s,
