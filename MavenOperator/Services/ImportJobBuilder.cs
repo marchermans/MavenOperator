@@ -86,9 +86,18 @@ public sealed class ImportJobBuilder(
             },
         };
 
-        logger.LogDebug(
-            "Built import Job {JobName} for import {ImportName} (mode={TransferMode})",
-            name, importName, transferMode);
+        if (imagePullSecrets is not null && imagePullSecrets.Any())
+        {
+            logger.LogInformation(
+                "Built import Job {JobName} for import {ImportName} with {Count} imagePullSecret: [{Names}] (mode={TransferMode})",
+                name, importName, imagePullSecrets.Count(), string.Join(", ", imagePullSecrets.Select(s => s.Name)), transferMode);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Built import Job {JobName} for import {ImportName} without imagePullSecret (mode={TransferMode})",
+                name, importName, transferMode);
+        }
 
         return Task.FromResult(job);
     }

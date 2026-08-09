@@ -73,6 +73,9 @@ public sealed class MavenRepositoryImportController(
         var ns     = Environment.GetEnvironmentVariable("OPERATOR_NAMESPACE")
                      ?? "maven-operator-system";
 
+        logger.LogInformation(
+            "Resolving imagePullSecret for import jobs (SA={SaName}, NS={Namespace})", saName, ns);
+
         // 1. Read from env var (pod-level imagePullSecrets injected by Helm)
         var podLevelSecrets = ParseImagePullSecretsFromEnv();
 
@@ -83,14 +86,14 @@ public sealed class MavenRepositoryImportController(
             var sa = await k8s.GetAsync<V1ServiceAccount>(saName, ns);
             if (sa?.ImagePullSecrets is not null && sa.ImagePullSecrets.Count > 0)
             {
-                logger.LogDebug(
+                logger.LogInformation(
                     "Read {Count} imagePullSecret from operator SA '{SaName}' in namespace '{Namespace}'",
                     sa.ImagePullSecrets.Count, saName, ns);
                 saLevelSecrets = new List<V1LocalObjectReference>(sa.ImagePullSecrets);
             }
             else
             {
-                logger.LogDebug("No imagePullSecret on operator SA '{SaName}'", saName);
+                logger.LogInformation("No imagePullSecret on operator SA '{SaName}' in namespace '{Namespace}'", saName, ns);
                 saLevelSecrets = null;
             }
         }
@@ -124,8 +127,12 @@ public sealed class MavenRepositoryImportController(
 
         if (merged.Count > 0)
         {
-            logger.LogDebug("Resolved {Count} imagePullSecret for import jobs (pod={Pod}, sa={Sa})",
-                merged.Count, podLevelSecrets?.Count ?? 0, saLevelSecrets?.Count ?? 0);
+            logger.LogInformation("Resolved {Count} imagePullSecret for import jobs: [{Names}] (pod={Pod}, sa={Sa})",
+                merged.Count, string.Join(", ", merged.Select(s => s.Name)), podLevelSecrets?.Count ?? 0, saLevelSecrets?.Count ?? 0);
+        }
+        else
+        {
+            logger.LogInformation("No imagePullSecret resolved for import jobs");
         }
 
         return merged.Count > 0 ? merged : null;
@@ -319,13 +326,21 @@ public sealed class MavenRepositoryImportController(
             // 4a. Ensure import-job ServiceAccount exists in this namespace (lazy init)
             await EnsureImportJobServiceAccountAsync(ns, cancellationToken);
 
-            // 5. Build and create the Job (imagePullSecrets come from SA)
-            // Resolve imagePullSecrets and copy them to the import namespace before creating the Job.
+            // 5. Build and create the Job (imagePullSecrets on pod spec)
+            // Resolve imagePullSecrets from operator deployment and copy them to the import namespace.
             var desiredSecrets = await GetOperatorImagePullSecretsAsync();
 
-            foreach (var secretRef in desiredSecrets ?? [])
+            if (desiredSecrets is null || desiredSecrets.Count == 0)
             {
-                await EnsureImagePullSecretCopiedAsync(secretRef.Name, ns, cancellationToken);
+                logger.LogWarning(
+                    "No imagePullSecret resolved for import jobs — Job may fail to pull from private registry");
+            }
+            else
+            {
+                foreach (var secretRef in desiredSecrets)
+                {
+                    await EnsureImagePullSecretCopiedAsync(secretRef.Name, ns, cancellationToken);
+                }
             }
 
             var job = await jobBuilder.BuildJobAsync(
@@ -646,14 +661,24 @@ public sealed class MavenRepositoryImportController(
         var operatorNs = Environment.GetEnvironmentVariable("OPERATOR_NAMESPACE")
                          ?? "maven-operator-system";
 
+        logger.LogInformation(
+            "Ensuring imagePullSecret '{SecretName}' exists in namespace '{TargetNamespace}' (source: '{OperatorNamespace}')",
+            secretName, targetNamespace, operatorNs);
+
         // Check if already present in target namespace
         try
         {
             await k8s.GetAsync<V1Secret>(secretName, targetNamespace, ct);
+            logger.LogInformation(
+                "imagePullSecret '{SecretName}' already exists in namespace '{TargetNamespace}' — skipping copy",
+                secretName, targetNamespace);
             return; // already exists — nothing to do
         }
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
+            logger.LogInformation(
+                "imagePullSecret '{SecretName}' not found in namespace '{TargetNamespace}' — will copy from '{OperatorNamespace}'",
+                secretName, targetNamespace, operatorNs);
             // Not present yet — copy below
         }
 
@@ -666,7 +691,7 @@ public sealed class MavenRepositoryImportController(
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             logger.LogWarning(
-                "ImagePullSecret '{SecretName}' not found in operator namespace '{OperatorNamespace}' — import jobs may fail to pull images",
+                "imagePullSecret '{SecretName}' not found in operator namespace '{OperatorNamespace}' — import jobs may fail to pull images",
                 secretName, operatorNs);
             return;
         }
