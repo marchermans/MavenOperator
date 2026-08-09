@@ -22,6 +22,7 @@ public sealed class ImportJobBuilder(
         MavenRepositoryV1Alpha1 target,
         ResolvedTransferMode transferMode,
         string importJobImage,
+        IEnumerable<V1LocalObjectReference>? imagePullSecrets,
         CancellationToken ct)
     {
         var importName = import.Metadata.Name!;
@@ -79,6 +80,7 @@ public sealed class ImportJobBuilder(
                         Containers         = [container],
                         Volumes            = volumes,
                         ServiceAccountName = ImportJobServiceAccountName,
+                        ImagePullSecrets   = imagePullSecrets?.ToList(),
                     },
                 },
             },

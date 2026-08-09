@@ -26,7 +26,7 @@ namespace MavenOperator.Controllers;
 [EntityRbac(typeof(V1Deployment),                   Verbs = RbacVerb.Get | RbacVerb.Patch | RbacVerb.Update)]
 [EntityRbac(typeof(V1PersistentVolumeClaim),        Verbs = RbacVerb.Get | RbacVerb.List)]
 [EntityRbac(typeof(V1Pod),                          Verbs = RbacVerb.List)]
-[EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.List | RbacVerb.Watch | RbacVerb.Create | RbacVerb.Update | RbacVerb.Patch)]
+[EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.List | RbacVerb.Watch | RbacVerb.Create)]
 // Note: V1ClusterRoleBinding permissions are granted via Helm chart RBAC, not EntityRbac.
 // Using EntityRbac here causes KubeOps to try validating a binding named after the controller.
 public sealed class MavenRepositoryImportController(
@@ -320,7 +320,16 @@ public sealed class MavenRepositoryImportController(
             await EnsureImportJobServiceAccountAsync(ns, cancellationToken);
 
             // 5. Build and create the Job (imagePullSecrets come from SA)
-            var job = await jobBuilder.BuildJobAsync(entity, target, transferMode, ImportJobImage, cancellationToken);
+            // Resolve imagePullSecrets and copy them to the import namespace before creating the Job.
+            var desiredSecrets = await GetOperatorImagePullSecretsAsync();
+
+            foreach (var secretRef in desiredSecrets ?? [])
+            {
+                await EnsureImagePullSecretCopiedAsync(secretRef.Name, ns, cancellationToken);
+            }
+
+            var job = await jobBuilder.BuildJobAsync(
+                entity, target, transferMode, ImportJobImage, desiredSecrets, cancellationToken);
 
             try
             {
@@ -547,8 +556,7 @@ public sealed class MavenRepositoryImportController(
     }
 
     /// <summary>
-    /// Lazily creates the import-job ServiceAccount and RoleBinding in the given namespace.
-    /// Copies imagePullSecret from operator's namespace into target namespace so Jobs can pull from private registries.
+    /// Lazily creates the import-job ServiceAccount and ClusterRoleBinding in the given namespace.
     /// This is called before creating an import Job to ensure it has a valid SA to run as.
     /// Idempotent — safe to call every reconciliation.
     /// </summary>
@@ -558,29 +566,12 @@ public sealed class MavenRepositoryImportController(
     {
         const string saName = "maven-operator-import";
 
-        // Resolve operator's imagePullSecrets (lazy, cached after first read)
-        var desiredSecrets = await GetOperatorImagePullSecretsAsync();
-
-        // Copy each referenced Secret into the target namespace if not already present.
-        // ImagePullSecrets are namespace-scoped — we can't cross-reference them.
-        foreach (var secretRef in desiredSecrets ?? [])
-        {
-            await EnsureImagePullSecretCopiedAsync(secretRef.Name, ns, ct);
-        }
-
-        // Check if SA already exists; update imagePullSecrets if needed
+        // Check if SA already exists
         try
         {
             var existing = await k8s.GetAsync<V1ServiceAccount>(saName, ns, ct);
             if (existing is not null)
-            {
-                if (NeedsImagePullSecretUpdate(existing, desiredSecrets))
-                {
-                    ApplySaImagePullSecrets(existing, desiredSecrets);
-                    await PatchServiceAccountAsync(existing, ct);
-                }
-                return;
-            }
+                return; // already present
         }
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -596,8 +587,6 @@ public sealed class MavenRepositoryImportController(
             Kind       = "ServiceAccount",
             Metadata   = new V1ObjectMeta { Name = saName, NamespaceProperty = ns },
         };
-
-        ApplySaImagePullSecrets(sa, desiredSecrets);
 
         try
         {
@@ -642,41 +631,6 @@ public sealed class MavenRepositoryImportController(
         {
             logger.LogDebug("ClusterRoleBinding '{CrbName}' already exists (race)", crb.Metadata.Name);
         }
-    }
-
-    private static bool NeedsImagePullSecretUpdate(
-        V1ServiceAccount sa,
-        List<V1LocalObjectReference>? desired) =>
-        desired is not null && desired.Count > 0 &&
-        !AreImagePullSecretsEqual(sa.ImagePullSecrets, desired);
-
-    private static void ApplySaImagePullSecrets(
-        V1ServiceAccount sa,
-        List<V1LocalObjectReference>? desired)
-    {
-        if (desired is not null && desired.Count > 0)
-            sa.ImagePullSecrets = new List<V1LocalObjectReference>(desired);
-    }
-
-    private static bool AreImagePullSecretsEqual(
-        IEnumerable<V1LocalObjectReference>? existing,
-        IEnumerable<V1LocalObjectReference> desired)
-    {
-        if (existing is null || !existing.Any())
-            return false;
-
-        var existingNames = new HashSet<string>(existing.Select(s => s.Name));
-        var desiredNames  = new HashSet<string>(desired.Select(s => s.Name));
-        return existingNames.SetEquals(desiredNames);
-    }
-
-    private async Task PatchServiceAccountAsync(V1ServiceAccount sa, CancellationToken ct)
-    {
-        logger.LogInformation(
-            "Patching ServiceAccount '{SaName}' in namespace '{Namespace}' with imagePullSecrets",
-            sa.Metadata.Name!, sa.Metadata.NamespaceProperty!);
-
-        await k8s.UpdateAsync(sa, ct);
     }
 
     /// <summary>

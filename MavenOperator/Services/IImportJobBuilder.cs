@@ -20,6 +20,7 @@ public interface IImportJobBuilder
         MavenRepositoryV1Alpha1 target,
         ResolvedTransferMode transferMode,
         string importJobImage,
+        IEnumerable<V1LocalObjectReference>? imagePullSecrets,
         CancellationToken ct);
 }
 
