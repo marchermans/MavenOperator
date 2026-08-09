@@ -49,9 +49,15 @@ spec:
               value: {{ include "maven-operator.virtualProxyImage" . | quote }}
             - name: IMPORT_JOB_IMAGE
               value: {{ include "maven-operator.importJobImage" . | quote }}
+            - name: OPERATOR_SERVICE_ACCOUNT_NAME
+              value: {{ include "maven-operator.serviceAccountName" . | quote }}
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- with .Values.imagePullSecrets }}
             - name: IMAGE_PULL_SECRETS_JSON
-              value: {{ toYaml . | toJson | quote }}
+              value: {{ toJson . | quote }}
             {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

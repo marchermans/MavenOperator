@@ -39,14 +39,91 @@ public sealed class MavenRepositoryImportController(
     private const string PreImportReplicasAnnotation = "maven.operator.io/pre-import-replicas";
     private const string ImportCleanupFinalizer      = "maven.operator.io/import-cleanup";
 
-    // Image and pull secrets are injected by Helm at deployment time.
+    // Image is injected by Helm at deployment time.
     private static readonly string ImportJobImage =
         Environment.GetEnvironmentVariable("IMPORT_JOB_IMAGE")
             ?? "ghcr.io/marchermans/maven-operator-import-job:latest";
 
-    private static readonly List<V1LocalObjectReference>? ImagePullSecrets = ParseImagePullSecrets();
+    // Read imagePullSecrets from both the operator's Pod spec (via env var) and ServiceAccount.
+    // This covers all deployment patterns: Helm imagePullSecrets on pod, SA-level secrets, or both.
+    private Task<List<V1LocalObjectReference>?>? _operatorImagePullSecretsTask;
 
-    private static List<V1LocalObjectReference>? ParseImagePullSecrets()
+    private async Task<List<V1LocalObjectReference>?> GetOperatorImagePullSecretsAsync()
+    {
+        if (_operatorImagePullSecretsTask is not null)
+            return await _operatorImagePullSecretsTask;
+
+        var task = ResolveOperatorImagePullSecretsAsync();
+        _operatorImagePullSecretsTask = task;
+        return await task;
+    }
+
+    private async Task<List<V1LocalObjectReference>?> ResolveOperatorImagePullSecretsAsync()
+    {
+        var saName = Environment.GetEnvironmentVariable("OPERATOR_SERVICE_ACCOUNT_NAME")
+                     ?? "maven-operator";
+        var ns     = Environment.GetEnvironmentVariable("OPERATOR_NAMESPACE")
+                     ?? "maven-operator-system";
+
+        // 1. Read from env var (pod-level imagePullSecrets injected by Helm)
+        var podLevelSecrets = ParseImagePullSecretsFromEnv();
+
+        // 2. Read from ServiceAccount
+        List<V1LocalObjectReference>? saLevelSecrets;
+        try
+        {
+            var sa = await k8s.GetAsync<V1ServiceAccount>(saName, ns);
+            if (sa?.ImagePullSecrets is not null && sa.ImagePullSecrets.Count > 0)
+            {
+                logger.LogDebug(
+                    "Read {Count} imagePullSecret from operator SA '{SaName}' in namespace '{Namespace}'",
+                    sa.ImagePullSecrets.Count, saName, ns);
+                saLevelSecrets = new List<V1LocalObjectReference>(sa.ImagePullSecrets);
+            }
+            else
+            {
+                logger.LogDebug("No imagePullSecret on operator SA '{SaName}'", saName);
+                saLevelSecrets = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read operator ServiceAccount '{SaName}' in namespace '{Namespace}'", saName, ns);
+            saLevelSecrets = null;
+        }
+
+        // 3. Merge both sources, deduplicating by name (pod-level takes precedence for same name)
+        var merged = new List<V1LocalObjectReference>();
+        var seen   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (saLevelSecrets is not null)
+        {
+            foreach (var s in saLevelSecrets)
+            {
+                if (seen.Add(s.Name))
+                    merged.Add(s);
+            }
+        }
+
+        if (podLevelSecrets is not null)
+        {
+            foreach (var s in podLevelSecrets)
+            {
+                if (seen.Add(s.Name))
+                    merged.Add(s);
+            }
+        }
+
+        if (merged.Count > 0)
+        {
+            logger.LogDebug("Resolved {Count} imagePullSecret for import jobs (pod={Pod}, sa={Sa})",
+                merged.Count, podLevelSecrets?.Count ?? 0, saLevelSecrets?.Count ?? 0);
+        }
+
+        return merged.Count > 0 ? merged : null;
+    }
+
+    private static List<V1LocalObjectReference>? ParseImagePullSecretsFromEnv()
     {
         var json = Environment.GetEnvironmentVariable("IMAGE_PULL_SECRETS_JSON");
         if (string.IsNullOrWhiteSpace(json))
@@ -54,11 +131,13 @@ public sealed class MavenRepositoryImportController(
 
         try
         {
-            return System.Text.Json.JsonSerializer.Deserialize<List<V1LocalObjectReference>>(json);
+            var secrets = System.Text.Json.JsonSerializer.Deserialize<List<V1LocalObjectReference>>(json);
+            if (secrets is not null && secrets.Count > 0)
+                Console.WriteLine($"[INFO] Read {secrets.Count} imagePullSecret from IMAGE_PULL_SECRETS_JSON");
+            return secrets;
         }
         catch (Exception ex)
         {
-            // Log warning but don't fail startup — jobs will run without pull secrets.
             Console.WriteLine($"[WARN] Failed to parse IMAGE_PULL_SECRETS_JSON: {ex.Message}");
             return null;
         }
@@ -461,7 +540,7 @@ public sealed class MavenRepositoryImportController(
 
     /// <summary>
     /// Lazily creates the import-job ServiceAccount and RoleBinding in the given namespace.
-    /// Attaches imagePullSecrets (if configured) so Jobs can pull from private registries.
+    /// Copies imagePullSecret from operator's namespace into target namespace so Jobs can pull from private registries.
     /// This is called before creating an import Job to ensure it has a valid SA to run as.
     /// Idempotent — safe to call every reconciliation.
     /// </summary>
@@ -471,15 +550,25 @@ public sealed class MavenRepositoryImportController(
     {
         const string saName = "maven-operator-import";
 
+        // Resolve operator's imagePullSecrets (lazy, cached after first read)
+        var desiredSecrets = await GetOperatorImagePullSecretsAsync();
+
+        // Copy each referenced Secret into the target namespace if not already present.
+        // ImagePullSecrets are namespace-scoped — we can't cross-reference them.
+        foreach (var secretRef in desiredSecrets ?? [])
+        {
+            await EnsureImagePullSecretCopiedAsync(secretRef.Name, ns, ct);
+        }
+
         // Check if SA already exists; update imagePullSecrets if needed
         try
         {
             var existing = await k8s.GetAsync<V1ServiceAccount>(saName, ns, ct);
             if (existing is not null)
             {
-                if (NeedsImagePullSecretUpdate(existing))
+                if (NeedsImagePullSecretUpdate(existing, desiredSecrets))
                 {
-                    EnsureSaImagePullSecrets(existing);
+                    ApplySaImagePullSecrets(existing, desiredSecrets);
                     await PatchServiceAccountAsync(existing, ct);
                 }
                 return;
@@ -500,7 +589,7 @@ public sealed class MavenRepositoryImportController(
             Metadata   = new V1ObjectMeta { Name = saName, NamespaceProperty = ns },
         };
 
-        EnsureSaImagePullSecrets(sa);
+        ApplySaImagePullSecrets(sa, desiredSecrets);
 
         try
         {
@@ -547,14 +636,18 @@ public sealed class MavenRepositoryImportController(
         }
     }
 
-    private static bool NeedsImagePullSecretUpdate(V1ServiceAccount sa) =>
-        ImagePullSecrets is not null && ImagePullSecrets.Count > 0 &&
-        !AreImagePullSecretsEqual(sa.ImagePullSecrets, ImagePullSecrets);
+    private static bool NeedsImagePullSecretUpdate(
+        V1ServiceAccount sa,
+        List<V1LocalObjectReference>? desired) =>
+        desired is not null && desired.Count > 0 &&
+        !AreImagePullSecretsEqual(sa.ImagePullSecrets, desired);
 
-    private static void EnsureSaImagePullSecrets(V1ServiceAccount sa)
+    private static void ApplySaImagePullSecrets(
+        V1ServiceAccount sa,
+        List<V1LocalObjectReference>? desired)
     {
-        if (ImagePullSecrets is not null && ImagePullSecrets.Count > 0)
-            sa.ImagePullSecrets = new List<V1LocalObjectReference>(ImagePullSecrets);
+        if (desired is not null && desired.Count > 0)
+            sa.ImagePullSecrets = new List<V1LocalObjectReference>(desired);
     }
 
     private static bool AreImagePullSecretsEqual(
@@ -576,6 +669,77 @@ public sealed class MavenRepositoryImportController(
             sa.Metadata.Name!, sa.Metadata.NamespaceProperty!);
 
         await k8s.UpdateAsync(sa, ct);
+    }
+
+    /// <summary>
+    /// Ensures the given Secret exists in the target namespace by copying it from the operator's namespace.
+    /// ImagePullSecrets are namespace-scoped — we cannot cross-reference them across namespaces.
+    /// Idempotent: if the secret already exists in the target namespace, no action is taken.
+    /// </summary>
+    private async Task EnsureImagePullSecretCopiedAsync(
+        string secretName,
+        string targetNamespace,
+        CancellationToken ct)
+    {
+        var operatorNs = Environment.GetEnvironmentVariable("OPERATOR_NAMESPACE")
+                         ?? "maven-operator-system";
+
+        // Check if already present in target namespace
+        try
+        {
+            await k8s.GetAsync<V1Secret>(secretName, targetNamespace, ct);
+            return; // already exists — nothing to do
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // Not present yet — copy below
+        }
+
+        // Read from operator namespace
+        V1Secret source;
+        try
+        {
+            source = await k8s.GetAsync<V1Secret>(secretName, operatorNs, ct);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            logger.LogWarning(
+                "ImagePullSecret '{SecretName}' not found in operator namespace '{OperatorNamespace}' — import jobs may fail to pull images",
+                secretName, operatorNs);
+            return;
+        }
+
+        // Create a copy in the target namespace (strip owner references)
+        var copy = new V1Secret
+        {
+            ApiVersion = "v1",
+            Kind       = "Secret",
+            Metadata   = new V1ObjectMeta
+            {
+                Name              = secretName,
+                NamespaceProperty = targetNamespace,
+                Labels            = source.Metadata.Labels?.ToDictionary(l => l.Key, l => l.Value),
+                Annotations       = new Dictionary<string, string>
+                {
+                    ["maven.operator.io/copied-from-namespace"] = operatorNs,
+                },
+            },
+            Type    = source.Type,
+            Data    = source.Data?.ToDictionary(d => d.Key, d => d.Value),
+            StringData = source.StringData?.ToDictionary(d => d.Key, d => d.Value),
+        };
+
+        try
+        {
+            await k8s.CreateAsync(copy, ct);
+            logger.LogInformation(
+                "Copied imagePullSecret '{SecretName}' from namespace '{OperatorNamespace}' to '{TargetNamespace}'",
+                secretName, operatorNs, targetNamespace);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            logger.LogDebug("Secret '{SecretName}' already exists in namespace '{TargetNamespace}' (race)", secretName, targetNamespace);
+        }
     }
 }
 
