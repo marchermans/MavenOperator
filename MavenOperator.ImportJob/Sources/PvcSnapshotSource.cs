@@ -57,7 +57,11 @@ public sealed class PvcSnapshotSource : IRepositorySource
         if (!Directory.Exists(mountPath))
             throw new DirectoryNotFoundException($"Mount path does not exist: {mountPath}");
 
-        return Path.Combine(mountPath, "repositories", repositoryName);
+        var expectedPath = Path.Combine(mountPath, "repositories", repositoryName);
+        if (!Directory.Exists(expectedPath))
+            throw new DirectoryNotFoundException($"Expected directory does not exist: {expectedPath}");
+
+        return expectedPath;
     }
 
     public async IAsyncEnumerable<ArtifactDescriptor> CrawlAsync(

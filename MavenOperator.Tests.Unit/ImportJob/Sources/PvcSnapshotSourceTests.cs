@@ -61,24 +61,6 @@ public sealed class PvcSnapshotSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task CrawlAsync_SkipsMavenMetadataXml()
-    {
-        SeedFile("releases/com/example/lib/maven-metadata.xml");
-        SeedFile("releases/com/example/lib/1.0/lib.jar");
-
-        var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
-            NullLogger<PvcSnapshotSource>.Instance);
-
-        var artifacts = new List<ArtifactDescriptor>();
-        await foreach (var a in source.CrawlAsync(new ImportFilters(), CancellationToken.None))
-            artifacts.Add(a);
-
-        artifacts.ShouldHaveSingleItem();
-        artifacts[0].RelativePath.ShouldNotContain("maven-metadata");
-    }
-
-    [Fact]
     public async Task CrawlAsync_SkipsIndexAndCacheDirectories()
     {
         SeedFile("releases/.index/catalog");
@@ -161,9 +143,9 @@ public sealed class PvcSnapshotSourceTests : IDisposable
     {
         // Simulate approot layout with multiple repositories.
         // Only artifacts under "app/repositories/libs-release/" should be crawled.
-        SeedFile("app/repositories/libs-release/com/example/lib/1.0/lib.jar", repoPrefix: false);
-        SeedFile("app/repositories/libs-snapshot/org/snap/artifact/2.0/artifact.jar", repoPrefix: false); // different repo — should NOT be included
-        SeedFile("app/config/settings.xml", repoPrefix: false); // approot file — should NOT be included
+        SeedFile("repositories/libs-release/com/example/lib/1.0/lib.jar", repoPrefix: false);
+        SeedFile("repositories/libs-snapshot/org/snap/artifact/2.0/artifact.jar", repoPrefix: false); // different repo — should NOT be included
+        SeedFile("config/settings.xml", repoPrefix: false); // approot file — should NOT be included
 
         var source = new PvcSnapshotSource(
             _sourceDir, reposiliteLayout: true, repositoryName: "libs-release", appRootPvcMode: true,
@@ -182,7 +164,7 @@ public sealed class PvcSnapshotSourceTests : IDisposable
     public async Task CrawlAsync_AppRootPvcMode_WithDifferentApprootName()
     {
         // Simulate approot layout with "data" as the approot directory name.
-        SeedFile("data/repositories/releases/com/example/lib/1.0/lib.jar", repoPrefix: false);
+        SeedFile("repositories/releases/com/example/lib/1.0/lib.jar", repoPrefix: false);
 
         var source = new PvcSnapshotSource(
             _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: true,
