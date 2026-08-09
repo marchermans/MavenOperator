@@ -27,7 +27,8 @@ namespace MavenOperator.Controllers;
 [EntityRbac(typeof(V1PersistentVolumeClaim),        Verbs = RbacVerb.Get | RbacVerb.List)]
 [EntityRbac(typeof(V1Pod),                          Verbs = RbacVerb.List)]
 [EntityRbac(typeof(V1ServiceAccount),               Verbs = RbacVerb.Get | RbacVerb.List | RbacVerb.Watch | RbacVerb.Create | RbacVerb.Update | RbacVerb.Patch)]
-[EntityRbac(typeof(V1ClusterRoleBinding),           Verbs = RbacVerb.Get | RbacVerb.Create)]
+// Note: V1ClusterRoleBinding permissions are granted via Helm chart RBAC, not EntityRbac.
+// Using EntityRbac here causes KubeOps to try validating a binding named after the controller.
 public sealed class MavenRepositoryImportController(
     IKubernetesClient k8s,
     IKubernetesEventService events,
@@ -43,6 +44,13 @@ public sealed class MavenRepositoryImportController(
     private static readonly string ImportJobImage =
         Environment.GetEnvironmentVariable("IMPORT_JOB_IMAGE")
             ?? "ghcr.io/marchermans/maven-operator-import-job:latest";
+
+    // ClusterRole name for import jobs — configurable to support both dev and Helm deployments.
+    // Dev (config/rbac/import-job.yaml): "maven-operator-import"
+    // Helm: "{fullname}-import-job" (e.g., "maven-operator-maven-operator-import-job")
+    private static readonly string ImportJobClusterRoleName =
+        Environment.GetEnvironmentVariable("IMPORT_JOB_CLUSTER_ROLE_NAME")
+            ?? "maven-operator-import";
 
     // Read imagePullSecrets from both the operator's Pod spec (via env var) and ServiceAccount.
     // This covers all deployment patterns: Helm imagePullSecrets on pod, SA-level secrets, or both.
@@ -601,7 +609,7 @@ public sealed class MavenRepositoryImportController(
             return;
         }
 
-        // Create ClusterRoleBinding to the cluster-wide ClusterRole maven-operator-import.
+        // Create ClusterRoleBinding to the cluster-wide import-job ClusterRole.
         var crb = new V1ClusterRoleBinding
         {
             ApiVersion = "rbac.authorization.k8s.io/v1",
@@ -611,7 +619,7 @@ public sealed class MavenRepositoryImportController(
             {
                 ApiGroup = "rbac.authorization.k8s.io",
                 Kind     = "ClusterRole",
-                Name     = saName, // matches ClusterRole name from config/rbac/import-job.yaml
+                Name     = ImportJobClusterRoleName, // configurable via IMPORT_JOB_CLUSTER_ROLE_NAME env var
             },
             Subjects = new List<Rbacv1Subject>
             {

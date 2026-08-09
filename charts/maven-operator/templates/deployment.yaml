@@ -49,6 +49,8 @@ spec:
               value: {{ include "maven-operator.virtualProxyImage" . | quote }}
             - name: IMPORT_JOB_IMAGE
               value: {{ include "maven-operator.importJobImage" . | quote }}
+            - name: IMPORT_JOB_CLUSTER_ROLE_NAME
+              value: {{ printf "%s-import-job" (include "maven-operator.fullname" .) | quote }}
             - name: OPERATOR_SERVICE_ACCOUNT_NAME
               value: {{ include "maven-operator.serviceAccountName" . | quote }}
             - name: OPERATOR_NAMESPACE
