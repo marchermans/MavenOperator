@@ -512,8 +512,8 @@ public sealed class MavenRepositoryImportController(
             return;
         }
 
-        // Create RoleBinding to the cluster-wide ClusterRole maven-operator-import.
-        var rb = new V1RoleBinding
+        // Create ClusterRoleBinding to the cluster-wide ClusterRole maven-operator-import.
+        var crb = new V1ClusterRoleBinding
         {
             ApiVersion = "rbac.authorization.k8s.io/v1",
             Kind       = "ClusterRoleBinding",
@@ -537,13 +537,13 @@ public sealed class MavenRepositoryImportController(
 
         try
         {
-            await k8s.CreateAsync(rb, ct);
+            await k8s.CreateAsync(crb, ct);
             logger.LogInformation(
-                "Created ClusterRoleBinding '{RbName}' for import-job SA in namespace '{Namespace}'", rb.Metadata.Name, ns);
+                "Created ClusterRoleBinding '{CrbName}' for import-job SA in namespace '{Namespace}'", crb.Metadata.Name, ns);
         }
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Conflict)
         {
-            logger.LogDebug("ClusterRoleBinding '{RbName}' already exists (race)", rb.Metadata.Name);
+            logger.LogDebug("ClusterRoleBinding '{CrbName}' already exists (race)", crb.Metadata.Name);
         }
     }
 
