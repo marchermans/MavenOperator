@@ -122,6 +122,13 @@ public sealed class ImportOptionsSpec
     /// Auto = DirectWrite when target PVC is RWX-mountable, else Http fallback.
     /// </summary>
     public ImportTransferMode TransferMode { get; set; } = ImportTransferMode.Auto;
+    /// <summary>
+    /// Optional fsGroup for the import Job pod security context.
+    /// Kubernetes adds this group to all containers so they can read source PVC files owned by that GID.
+    /// Default is 999 (Reposilite's uid/gid). Set explicitly when importing from sources with different ownership,
+    /// e.g., JFrog Artifactory or custom backup volumes.
+    /// </summary>
+    public int? FsGroup { get; set; }
 }
 
 public enum ImportTransferMode

@@ -59,6 +59,7 @@ public sealed class DirectPvcSink : IRepositorySink
         await using var src  = File.OpenRead(source);
         await using var dst  = File.Create(dest);
         await src.CopyToAsync(dst, ct);
+        SetFilePermissions(dest);
         return src.Length;
     }
 
@@ -69,6 +70,7 @@ public sealed class DirectPvcSink : IRepositorySink
         _logger.LogDebug("Writing stream → {Dest}", dest);
         await using var dst  = File.Create(dest);
         await content.CopyToAsync(dst, ct);
+        SetFilePermissions(dest);
         return dst.Position;
     }
 
@@ -76,7 +78,54 @@ public sealed class DirectPvcSink : IRepositorySink
     {
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir))
+        {
             Directory.CreateDirectory(dir);
+            SetDirectoryPermissions(dir);
+        }
     }
+
+#if NET && UNIX
+    /// <summary>
+    /// Sets file permissions to 0644 (rw-r--r--) so nginx and other consumers can read artifacts.
+    /// Source PVC files may be owned by uid/gid 999 with mode 660; we normalize on write.
+    /// </summary>
+    private static void SetFilePermissions(string path)
+    {
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.FilePermissions_0644);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // Non-Unix platform — ignore
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to set permissions on {Path}", path);
+        }
+    }
+
+    /// <summary>
+    /// Sets directory permissions to 0755 (rwxr-xr-x) so they are traversable by all consumers.
+    /// </summary>
+    private static void SetDirectoryPermissions(string path)
+    {
+        try
+        {
+            Directory.SetUnixFileMode(path, UnixFileMode.FilePermissions_0755);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // Non-Unix platform — ignore
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to set permissions on directory {Path}", path);
+        }
+    }
+#else
+    private static void SetFilePermissions(string _) { /* No-op on non-Unix */ }
+    private static void SetDirectoryPermissions(string _) { /* No-op on non-Unix */ }
+#endif
 }
 
