@@ -360,29 +360,19 @@ jobs:
             **/*.trx
             .benchmarks/BenchmarkDotNet.Artifacts/**
 
-  # ── Release: push images + publish Helm chart (only when ALL tests pass) ────
-  release:
-    name: Push Images & Publish Helm Chart
+  # ── Release helpers: compute tags once, shared by all image jobs ─────────────
+  release-tags:
+    name: Compute Release Tags
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [version, build-and-test, docker-build, integration, performance] # Add e2e back again when needed.
-    permissions:
-      contents: read
-      packages: write
+    needs: [version]
+    outputs:
+      operator_tags: ${{ steps.tags.outputs.operator_tags }}
+      proxy_tags: ${{ steps.tags.outputs.proxy_tags }}
+      auth_proxy_tags: ${{ steps.tags.outputs.auth_proxy_tags }}
+      import_job_tags: ${{ steps.tags.outputs.import_job_tags }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Build the full set of Docker tags from the canonical version.
       # Release (v1.2.3 tag):  1.2.3, 1.2, latest
       # Snapshot (any branch): 1.2.3-pre.N, <branch-name>
@@ -420,49 +410,140 @@ jobs:
           echo "AuthProxy tags:${AP_TAGS}"
           echo "ImportJob tags:${IJ_TAGS}"
 
-      - name: Push operator image to GHCR (multi-arch)
+  # ── Release images (4 parallel jobs, one per image) ─────────────────────────
+  release-operator-image:
+    name: Push Operator Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push operator image (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.operator_tags }}
+          tags: ${{ needs.release-tags.outputs.operator_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Push virtual-proxy image to GHCR (multi-arch)
+  release-virtual-proxy-image:
+    name: Push Virtual Proxy Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push virtual-proxy image (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator.VirtualProxy/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.proxy_tags }}
+          tags: ${{ needs.release-tags.outputs.proxy_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Push auth-proxy image to GHCR (multi-arch)
+  release-auth-proxy-image:
+    name: Push Auth Proxy Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push auth-proxy image (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator.AuthProxy/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.auth_proxy_tags }}
+          tags: ${{ needs.release-tags.outputs.auth_proxy_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Push import-job image to GHCR (multi-arch)
+  release-import-job-image:
+    name: Push Import Job Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push import-job image (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: MavenOperator.ImportJob/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.import_job_tags }}
+          tags: ${{ needs.release-tags.outputs.import_job_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Release Helm chart (after all images are pushed) ────────────────────────
+  release-helm-chart:
+    name: Publish Helm Chart
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags,
+            release-operator-image, release-virtual-proxy-image, release-auth-proxy-image, release-import-job-image]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup Helm
         uses: azure/setup-helm@v5
@@ -480,7 +561,6 @@ jobs:
 
       - name: Lint Helm chart
         run: helm lint charts/maven-operator
-
 
       - name: Package Helm chart
         run: helm package charts/maven-operator --destination /tmp/helm-packages
