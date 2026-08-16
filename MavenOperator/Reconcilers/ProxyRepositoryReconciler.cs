@@ -66,6 +66,17 @@ public sealed class ProxyRepositoryReconciler(
         await resources.EnsureSecretAsync(entity, $"{name}-download-htpasswd",
             new Dictionary<string, string> { ["download.htpasswd"] = downloadHtpasswd }, ct);
 
+        // 1a ── Upload htpasswd Secret (for Passthrough mode) ──────────────────
+        var uploadNeedsHtpasswd = spec.Upstream.Upload.Enabled
+                                  && spec.Upstream.Upload.Mode == ProxyUploadMode.Passthrough
+                                  && spec.Auth.Upload.Policy == AuthPolicy.Authenticated;
+        if (uploadNeedsHtpasswd)
+        {
+            var uploadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct);
+            await resources.EnsureSecretAsync(entity, $"{name}-upload-htpasswd",
+                new Dictionary<string, string> { ["upload.htpasswd"] = uploadHtpasswd }, ct);
+        }
+
         entity.Status.SetCondition("AuthReady", isTrue: true,
             reason: "HtpasswdGenerated",
             message: $"{spec.Auth.Download.Users.Count} download user(s) configured");
@@ -92,6 +103,94 @@ public sealed class ProxyRepositoryReconciler(
         // 2 ── Upstream auth header (if upstream credentials are configured) ───
         var upstreamAuthHeader = await BuildUpstreamAuthHeaderAsync(entity, spec.Upstream, ns, ct);
 
+        // 2b ── Upload forwarding configuration ────────────────────────────────
+        var uploadSpec = spec.Upstream.Upload;
+        bool uploadEnabled = false;
+        ProxyUploadMode uploadMode = ProxyUploadMode.Passthrough;
+        AuthPolicy uploadPolicy = spec.Auth.Upload.Policy;
+        string upstreamUploadAuthHeader = string.Empty;
+        bool uploadCredentialsConfigured = true;
+        string? uploadSyncError = null;
+
+        if (uploadSpec.Enabled)
+        {
+            // Check external exposure before allowing uploads
+            var isExternallyExposed = await IsProxyExternallyExposedAsync(entity, spec, ns, ct);
+            if (isExternallyExposed && !uploadSpec.ForceAllowOnExternal)
+            {
+                entity.Status.SetCondition("UploadForbidden", isTrue: true,
+                    reason: "ExternallyExposedProxy",
+                    message: "Upload forwarding blocked — proxy is externally exposed. Set forceAllowOnExternal: true to override.");
+                await events.PublishAsync(entity, "Warning", "UploadBlockedExternallyExposed",
+                    $"Upload forwarding disabled for '{name}' because the proxy is externally exposed without forceAllowOnExternal.", ct: ct);
+
+                // Still render NGINX config with uploads disabled
+            }
+            else
+            {
+                uploadEnabled = true;
+                uploadMode = uploadSpec.Mode;
+
+                // Load upstream credentials for upload forwarding
+                if (uploadSpec.UpstreamCredentialsRef is not null && !string.IsNullOrWhiteSpace(uploadSpec.UpstreamCredentialsRef.Name))
+                {
+                    try
+                    {
+                        var credsNs = string.IsNullOrWhiteSpace(uploadSpec.UpstreamCredentialsRef.Namespace) ? ns : uploadSpec.UpstreamCredentialsRef.Namespace;
+                        upstreamUploadAuthHeader = await BuildUpstreamAuthHeaderFromSecretAsync(
+                            entity, uploadSpec.UpstreamCredentialsRef.Name, credsNs, "upload", ct);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        uploadSyncError = $"Failed to load upload credentials Secret '{uploadSpec.UpstreamCredentialsRef.Name}': {ex.Message}";
+                        uploadCredentialsConfigured = false;
+                        entity.Status.SetCondition("UploadConfigurationError", isTrue: true,
+                            reason: "MissingCredentialsSecret",
+                            message: uploadSyncError);
+                        await events.PublishAsync(entity, "Warning", "UpstreamCredentialsMissing",
+                            $"Upload credentials Secret '{uploadSpec.UpstreamCredentialsRef.Name}' not found or unreadable.", ct: ct);
+
+                        // Disable uploads if credentials can't be loaded
+                        uploadEnabled = false;
+                    }
+                }
+                else
+                {
+                    uploadSyncError = "upstreamCredentialsRef.name is required when upload.enabled is true";
+                    uploadCredentialsConfigured = false;
+                    entity.Status.SetCondition("UploadConfigurationError", isTrue: true,
+                        reason: "MissingCredentialsSecret",
+                        message: uploadSyncError);
+                    await events.PublishAsync(entity, "Warning", "UpstreamCredentialsMissing",
+                        $"upload.upstreamCredentialsRef.name not set for '{name}'.", ct: ct);
+
+                    uploadEnabled = false;
+                }
+            }
+        }
+
+        // Set upload status (only when spec has uploads configured)
+        if (spec.Upstream.Upload.Enabled || uploadSyncError != null)
+        {
+            entity.Status.Upload ??= new UploadStatus();
+            entity.Status.Upload.Proxy = new ProxyUploadStatus
+            {
+                Enabled = uploadEnabled,
+                Mode = uploadMode,
+                UpstreamCredentialsConfigured = uploadCredentialsConfigured,
+                LastSyncError = uploadSyncError,
+            };
+
+            if (uploadEnabled && string.IsNullOrEmpty(uploadSyncError))
+            {
+                entity.Status.SetCondition("UploadReady", isTrue: true,
+                    reason: "UploadForwardingEnabled",
+                    message: $"Upload forwarding enabled with mode={uploadMode}");
+                await events.PublishAsync(entity, "Normal", "UploadEnabled",
+                    $"Upload forwarding enabled for '{name}' (mode={uploadMode})", ct: ct);
+            }
+        }
+
         // 3 ── NGINX ConfigMap ─────────────────────────────────────────────────
         var nginxConfig   = nginx.RenderProxy(
             name,
@@ -101,7 +200,11 @@ public sealed class ProxyRepositoryReconciler(
             upstreamAuthHeader,
             spec.Metrics,
             downloadUsesAuthProxy,
-            repositoryPathPrefix);
+            repositoryPathPrefix,
+            uploadEnabled: uploadEnabled,
+            uploadMode: uploadMode,
+            uploadPolicy: uploadPolicy,
+            upstreamUploadAuthHeader: upstreamUploadAuthHeader);
 
         var configMapName = $"{name}-nginx-cm";
         await resources.EnsureConfigMapAsync(entity, configMapName,
@@ -313,6 +416,64 @@ public sealed class ProxyRepositoryReconciler(
 
         throw new InvalidOperationException(
             $"Credential Secret '{secretName}' is missing the required key '{key}'.");
+    }
+
+    /// <summary>
+    /// Reads a credential Secret and returns a base64-encoded "Basic &lt;b64(user:pass)&gt;" header value.
+    /// </summary>
+    private async Task<string> BuildUpstreamAuthHeaderFromSecretAsync(
+        MavenRepositoryV1Alpha1 entity,
+        string secretName,
+        string ns,
+        string purpose,
+        CancellationToken ct)
+    {
+        var secret = await k8s.GetAsync<V1Secret>(secretName, ns, ct)
+            ?? throw new InvalidOperationException(
+                $"Upload credential Secret '{secretName}' not found in namespace '{ns}'.");
+
+        var username = GetSecretKey(secret, "username", secretName);
+        var password = GetSecretKey(secret, "password", secretName);
+        var encoded  = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{username}:{password}"));
+
+        return $"Basic {encoded}";
+    }
+
+    /// <summary>
+    /// Checks whether this proxy is externally exposed via Service type or Ingress/Gateway.
+    /// </summary>
+    private async Task<bool> IsProxyExternallyExposedAsync(
+        MavenRepositoryV1Alpha1 entity,
+        MavenRepositorySpec spec,
+        string ns,
+        CancellationToken ct)
+    {
+        // Check if Ingress is enabled (routes external traffic to this proxy's Service)
+        if (spec.Ingress.Enabled)
+            return true;
+
+        // Check if Gateway is enabled (creates HTTPRoute for external traffic)
+        if (spec.Gateway.Enabled)
+            return true;
+
+        // Check the Service type — LoadBalancer and NodePort are externally exposed
+        var serviceName = $"{entity.Metadata.Name}-svc";
+        try
+        {
+            var service = await k8s.GetAsync<V1Service>(serviceName, ns, ct);
+            if (service is not null)
+            {
+                var svcType = service.Spec?.Type;
+                if (svcType == "LoadBalancer" || svcType == "NodePort")
+                    return true;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "[Proxy] Failed to check Service type for '{Name}' — assuming not externally exposed.", entity.Metadata.Name);
+        }
+
+        return false;
     }
 
     private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useAuthProxy = false)

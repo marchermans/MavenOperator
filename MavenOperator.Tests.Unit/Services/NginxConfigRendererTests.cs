@@ -1,7 +1,9 @@
 using Shouldly;
 using MavenOperator.Entities.Spec;
 using MavenOperator.Services;
+
 namespace MavenOperator.Tests.Unit.Services;
+
 public sealed class NginxConfigRendererTests
 {
     private readonly INginxConfigRenderer _sut = new NginxConfigRenderer();
@@ -90,5 +92,136 @@ public sealed class NginxConfigRendererTests
 
         result.ShouldContain("location /");
         result.ShouldNotContain("location /repository/public/");
+    }
+
+    // ── Proxy upload forwarding tests ────────────────────────────────────────
+
+    [Fact]
+    public void RenderProxy_WithoutUpload_DoesNotContainLimitExcept()
+    {
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty);
+
+        result.ShouldNotContain("limit_except");
+        result.ShouldNotContain("upload.htpasswd");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_PassthroughMode_ContainsClientAuthAndUpstreamCredentials()
+    {
+        var upstreamCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("deployer:s3cr3t"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Passthrough,
+            uploadPolicy: AuthPolicy.Authenticated,
+            upstreamUploadAuthHeader: $"Basic {upstreamCreds}");
+
+        // Should have limit_except block for write methods
+        result.ShouldContain("limit_except GET HEAD OPTIONS");
+
+        // Client auth enforced in Passthrough mode with Authenticated policy
+        result.ShouldContain("auth_basic \"Maven Upload - my-proxy\"");
+        result.ShouldContain("upload.htpasswd");
+
+        // Upstream credentials injected for forwarding
+        result.ShouldContain($"proxy_set_header Authorization \"Basic {upstreamCreds}\"");
+
+        // Cache bypassed for writes
+        result.ShouldContain("proxy_cache off;");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_PassthroughMode_AnonymousPolicy_NoClientAuth()
+    {
+        var upstreamCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("deployer:s3cr3t"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Passthrough,
+            uploadPolicy: AuthPolicy.Anonymous,
+            upstreamUploadAuthHeader: $"Basic {upstreamCreds}");
+
+        // limit_except block exists but no client auth (Anonymous policy)
+        result.ShouldContain("limit_except GET HEAD OPTIONS");
+        result.ShouldNotContain("auth_basic \"Maven Upload - my-proxy\"");
+
+        // Still forwards with upstream credentials
+        result.ShouldContain($"proxy_set_header Authorization \"Basic {upstreamCreds}\"");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_OverrideMode_NoClientAuth()
+    {
+        var upstreamCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("deployer:s3cr3t"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Override,
+            uploadPolicy: AuthPolicy.Authenticated, // Ignored in Override mode
+            upstreamUploadAuthHeader: $"Basic {upstreamCreds}");
+
+        // limit_except block exists but no client auth (Override mode)
+        result.ShouldContain("limit_except GET HEAD OPTIONS");
+        result.ShouldNotContain("auth_basic \"Maven Upload - my-proxy\"");
+
+        // Still forwards with upstream credentials
+        result.ShouldContain($"proxy_set_header Authorization \"Basic {upstreamCreds}\"");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_FallsBackToReadAuthHeader_WhenNoUploadCredentials()
+    {
+        var readCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("reader:pass"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            $"Basic {readCreds}", // upstreamAuthHeader for reads
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Passthrough,
+            uploadPolicy: AuthPolicy.Authenticated,
+            upstreamUploadAuthHeader: string.Empty);
+
+        // Should fall back to read auth header when no dedicated upload credentials
+        result.ShouldContain($"proxy_set_header Authorization \"Basic {readCreds}\"");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_PreservesReadCacheBehavior()
+    {
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Passthrough,
+            uploadPolicy: AuthPolicy.Authenticated);
+
+        // Read caching should still be configured at location level
+        result.ShouldContain("proxy_cache my_proxy_cache;");
+        result.ShouldContain("proxy_cache_methods GET HEAD;");
+
+        // Write operations bypass cache (inside limit_except)
+        result.ShouldContain("proxy_cache off;");
     }
 }

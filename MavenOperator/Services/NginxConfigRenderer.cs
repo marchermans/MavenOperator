@@ -23,7 +23,11 @@ public interface INginxConfigRenderer
         string upstreamAuthHeader,
         MetricsSpec? metrics = null,
         bool downloadAuthProxyEnabled = false,
-        string? pathPrefix = null);
+        string? pathPrefix = null,
+        bool uploadEnabled = false,
+        ProxyUploadMode uploadMode = ProxyUploadMode.Passthrough,
+        AuthPolicy uploadPolicy = AuthPolicy.Authenticated,
+        string upstreamUploadAuthHeader = "");
 
     /// <summary>
     /// Returns the content of the mtail program ConfigMap (maven.mtail).
@@ -104,7 +108,11 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         string upstreamAuthHeader,
         MetricsSpec? metrics = null,
         bool downloadAuthProxyEnabled = false,
-        string? pathPrefix = null)
+        string? pathPrefix = null,
+        bool uploadEnabled = false,
+        ProxyUploadMode uploadMode = ProxyUploadMode.Passthrough,
+        AuthPolicy uploadPolicy = AuthPolicy.Authenticated,
+        string upstreamUploadAuthHeader = "")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamUrl);
@@ -134,6 +142,10 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             path_prefix = resolvedPathPrefix,
             location_path_prefix = locationPathPrefix,
             path_prefix_regex = regexPrefix,
+            upload_enabled        = uploadEnabled,
+            upload_mode           = uploadMode.ToString(),
+            upload_policy         = uploadPolicy.ToString(),
+            upstream_upload_auth_header = upstreamUploadAuthHeader ?? string.Empty,
         }, member => member.Name);
     }
 
