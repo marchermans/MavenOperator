@@ -55,6 +55,9 @@ spec:
                 # Ingress: tlsSecretRef and certManager cannot both be set.
                 - rule: "!(has(self.ingress) && has(self.ingress.tlsSecretRef) && self.ingress.tlsSecretRef != '' && has(self.ingress.certManager))"
                   message: "spec.ingress.tlsSecretRef and spec.ingress.certManager cannot both be set"
+                # Proxy upload enabled → upstreamCredentialsRef.name must be present (simplified).
+                - rule: "!has(self.upstream.upload) || !self.upstream.upload.enabled || self.upstream.upload.upstreamCredentialsRef.name != ''"
+                  message: "spec.upstream.upload.upstreamCredentialsRef.name is required when proxy upload is enabled"
               properties:
                 type:
                   type: string
@@ -106,6 +109,47 @@ spec:
                       properties:
                         secretRef:
                           type: string
+                    upload:
+                      type: object
+                      description: >
+                        Upload forwarding configuration for Proxy repositories.
+                        When enabled, PUT/DELETE requests are forwarded to the upstream
+                        using fixed credentials from upstreamCredentialsRef.
+                      default: {}
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: false
+                          description: >
+                            Whether upload forwarding is enabled on this proxy.
+                            Default: false (read-only cache).
+                        mode:
+                          type: string
+                          enum: [Passthrough, Override]
+                          default: Passthrough
+                          description: >
+                            How client authentication is handled for uploads.
+                            - Passthrough: enforce auth.upload policy (default).
+                            - Override: skip client auth entirely (migration mode).
+                        upstreamCredentialsRef:
+                          type: object
+                          nullable: true
+                          description: >
+                            Credentials used to authenticate with the upstream Maven server for uploads.
+                            Required when enabled is true. Secret must contain "username" and "password".
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                              nullable: true
+                              description: Optional; defaults to same namespace as CRD.
+                        forceAllowOnExternal:
+                          type: boolean
+                          default: false
+                          description: >
+                            If true, allow uploads even if the proxy is externally exposed (LoadBalancer/Ingress).
+                            Default: false — uploads are blocked on externally exposed proxies for security.
                 virtual:
                   type: object
                   nullable: true
@@ -117,6 +161,51 @@ spec:
                     metadataCacheTtlSeconds:
                       type: integer
                       default: 60
+                    upload:
+                      type: object
+                      description: >
+                        Upload fan-out configuration for Virtual repositories.
+                        When configured with targets, uploads are distributed to declared members in parallel.
+                      default: {}
+                      properties:
+                        targets:
+                          type: array
+                          items:
+                            type: object
+                            required: [name]
+                            description: >
+                              List of member repositories that receive uploads.
+                              Empty list means uploads are disabled (405).
+                            properties:
+                              name:
+                                type: string
+                                description: >
+                                  Name of the member repository to upload to.
+                                  Must match an entry in spec.virtual.members[].
+                              credentialsRef:
+                                type: object
+                                nullable: true
+                                description: >
+                                  Optional per-target credentials override.
+                                  Falls back to sharedCredentialsRef if not set.
+                                properties:
+                                  name:
+                                    type: string
+                                  namespace:
+                                    type: string
+                                    nullable: true
+                        sharedCredentialsRef:
+                          type: object
+                          nullable: true
+                          description: >
+                            Shared credentials used for all upload targets that don't have their own CredentialsRef.
+                            Required if any target doesn't specify its own credentials.
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                              nullable: true
                 auth:
                   type: object
                   properties:

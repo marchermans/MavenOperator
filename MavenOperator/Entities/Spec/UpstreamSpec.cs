@@ -26,6 +26,13 @@ public sealed class UpstreamSpec
     /// Example: "5Gi". Omit or leave null to use ephemeral emptyDir (default).
     /// </summary>
     public string? CachePvcSize { get; set; }
+
+    /// <summary>
+    /// Upload forwarding configuration for Proxy repositories.
+    /// When enabled, PUT/DELETE requests are forwarded to the upstream using fixed credentials.
+    /// Defaults to disabled (read-only cache).
+    /// </summary>
+    public ProxyUploadSpec Upload { get; set; } = new();
 }
 
 /// <summary>
@@ -39,5 +46,60 @@ public sealed class UpstreamAuthSpec
     /// "username" and "password" keys for the upstream.
     /// </summary>
     public string SecretRef { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// How client authentication is handled for uploads to a Proxy repository.
+/// </summary>
+public enum ProxyUploadMode
+{
+    /// <summary>Enforce auth.upload policy; client must provide valid credentials.</summary>
+    Passthrough,
+
+    /// <summary>Skip client auth entirely; accept uploads from anyone (migration mode).</summary>
+    Override,
+}
+
+/// <summary>
+/// Reference to a Kubernetes object in the same or another namespace.
+/// </summary>
+public sealed class LocalObjectReference
+{
+    /// <summary>Name of the referenced object.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Optional namespace; defaults to the same namespace as the CRD.</summary>
+    public string? Namespace { get; set; }
+}
+
+/// <summary>
+/// Upload forwarding configuration for Proxy repositories.
+/// </summary>
+public sealed class ProxyUploadSpec
+{
+    /// <summary>
+    /// Whether upload forwarding is enabled on this proxy.
+    /// Default: false (read-only cache).
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// How client authentication is handled for uploads.
+    /// - Passthrough: enforce auth.upload policy (default).
+    /// - Override: skip client auth entirely (migration mode).
+    /// </summary>
+    public ProxyUploadMode Mode { get; set; } = ProxyUploadMode.Passthrough;
+
+    /// <summary>
+    /// Credentials used to authenticate with the upstream Maven server for uploads.
+    /// Required when Enabled is true.
+    /// </summary>
+    public LocalObjectReference? UpstreamCredentialsRef { get; set; }
+
+    /// <summary>
+    /// If true, allow uploads even if the proxy is externally exposed (LoadBalancer/Ingress).
+    /// Default: false — uploads are blocked on externally exposed proxies for security.
+    /// </summary>
+    public bool ForceAllowOnExternal { get; set; } = false;
 }
 

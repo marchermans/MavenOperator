@@ -1,3 +1,5 @@
+using MavenOperator.Entities.Spec;
+
 namespace MavenOperator.Entities.Status;
 
 /// <summary>
@@ -43,6 +45,68 @@ public sealed class RepositoryCondition
 }
 
 /// <summary>
+/// Upload status for Proxy repositories with upload forwarding enabled.
+/// </summary>
+public sealed class ProxyUploadStatus
+{
+    /// <summary>Whether upload forwarding is currently active.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>The configured client auth mode.</summary>
+    public ProxyUploadMode Mode { get; set; }
+
+    /// <summary>True if upstream credentials Secret was successfully loaded.</summary>
+    public bool UpstreamCredentialsConfigured { get; set; }
+
+    /// <summary>Error message if credentials could not be loaded, otherwise null.</summary>
+    public string? LastSyncError { get; set; }
+}
+
+/// <summary>
+/// Per-target upload status for Virtual repositories.
+/// </summary>
+public sealed class VirtualUploadTargetStatus
+{
+    /// <summary>Name of the target member repository.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>True if the target is reachable (via periodic HEAD probe).</summary>
+    public bool Reachable { get; set; }
+
+    /// <summary>Error message from last failed probe or upload, otherwise null.</summary>
+    public string? LastError { get; set; }
+
+    /// <summary>Timestamp of the last successful upload to this target.</summary>
+    public DateTime? LastUploadSuccess { get; set; }
+}
+
+/// <summary>
+/// Upload status for Virtual repositories with upload fan-out enabled.
+/// </summary>
+public sealed class VirtualUploadStatus
+{
+    /// <summary>True if uploadTargets is non-empty and uploads are active.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Per-target reachability and health status.</summary>
+    public List<VirtualUploadTargetStatus> Targets { get; set; } = [];
+}
+
+/// <summary>
+/// Upload-specific status, populated only for Proxy/Virtual repos with uploads enabled.
+/// </summary>
+public sealed class UploadStatus
+{
+    /// <summary>Status for Proxy repositories (only when type == Proxy).</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("proxy")]
+    public ProxyUploadStatus? Proxy { get; set; }
+
+    /// <summary>Status for Virtual repositories (only when type == Virtual).</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("virtual")]
+    public VirtualUploadStatus? Virtual { get; set; }
+}
+
+/// <summary>
 /// Status sub-resource for a MavenRepository CRD.
 /// </summary>
 public sealed class MavenRepositoryStatus
@@ -62,6 +126,11 @@ public sealed class MavenRepositoryStatus
     /// The generation of the CRD spec that was last successfully reconciled.
     /// </summary>
     public long ObservedGeneration { get; set; }
+
+    /// <summary>
+    /// Upload-specific status (only populated for Proxy/Virtual with uploads enabled).
+    /// </summary>
+    public UploadStatus? Upload { get; set; }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
