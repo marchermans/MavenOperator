@@ -17,6 +17,11 @@ public sealed class VirtualRepoConfig
     public string Name { get; set; } = string.Empty;
     public List<VirtualMember> Members { get; set; } = [];
     public int MetadataCacheTtlSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Upload fan-out configuration. When Targets is non-empty, uploads are enabled.
+    /// </summary>
+    public VirtualUploadConfig? Upload { get; set; }
 }
 
 /// <summary>

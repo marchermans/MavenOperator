@@ -30,6 +30,15 @@ public interface IVirtualProxyMetrics
     /// Records a metadata-merge operation and how many sources contributed.
     /// </summary>
     void RecordMetadataMerge(string repoName, int memberCount, double durationSeconds);
+
+    /// <summary>
+    /// Records an upload request to a specific target during fan-out.
+    /// </summary>
+    /// <param name="repoName">Virtual repository name.</param>
+    /// <param name="targetName">Name of the upload target (member repo).</param>
+    /// <param name="success">Whether the upload succeeded on this target.</param>
+    /// <param name="durationSeconds">Total fan-out duration in seconds.</param>
+    void RecordUploadRequest(string repoName, string targetName, bool success, double durationSeconds);
 }
 
 /// <summary>
@@ -76,6 +85,25 @@ public sealed class VirtualProxyMetrics : IVirtualProxyMetrics
             Buckets = [1, 2, 3, 5, 10]
         });
 
+    // virtual_proxy_upload_requests_total{repo,target,status}
+    private readonly Counter _uploadRequestsTotal = Metrics.CreateCounter(
+        "virtual_proxy_upload_requests_total",
+        "Total number of upload fan-out requests per target.",
+        new CounterConfiguration
+        {
+            LabelNames = ["repo_name", "target_name", "status"]
+        });
+
+    // virtual_proxy_upload_duration_seconds{repo,target}
+    private readonly Histogram _uploadDuration = Metrics.CreateHistogram(
+        "virtual_proxy_upload_duration_seconds",
+        "Duration of upload fan-out operations per target.",
+        new HistogramConfiguration
+        {
+            LabelNames = ["repo_name", "target_name"],
+            Buckets = Histogram.ExponentialBuckets(0.1, 2, 10) // 0.1s to ~51s
+        });
+
     /// <inheritdoc/>
     public void RecordRequest(string repoName, string artifactPath, string assetType, int statusCode)
         => _requestsTotal.WithLabels(repoName, artifactPath, assetType, statusCode.ToString()).Inc();
@@ -89,6 +117,14 @@ public sealed class VirtualProxyMetrics : IVirtualProxyMetrics
     {
         _metadataMergeDuration.WithLabels(repoName).Observe(durationSeconds);
         _metadataMergeMemberCount.WithLabels(repoName).Observe(memberCount);
+    }
+
+    /// <inheritdoc/>
+    public void RecordUploadRequest(string repoName, string targetName, bool success, double durationSeconds)
+    {
+        var status = success ? "success" : "failure";
+        _uploadRequestsTotal.WithLabels(repoName, targetName, status).Inc();
+        _uploadDuration.WithLabels(repoName, targetName).Observe(durationSeconds);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ using k8s.Models;
 using KubeOps.KubernetesClient;
 using MavenOperator.Entities;
 using MavenOperator.Entities.Spec;
+using MavenOperator.Entities.Status;
 using MavenOperator.Services;
 using System.Security.Cryptography;
 using System.Text;
@@ -35,6 +36,12 @@ public sealed class VirtualRepositoryReconciler(
     : IVirtualRepositoryReconciler
 {
     private sealed record MemberRoute(string Name, string BaseUrl);
+
+    // Matches MavenOperator.VirtualProxy.Services.UploadTargetConfig — used to build proxy config JSON.
+    private sealed record UploadTargetConfig(
+        string Name,
+        string BaseUrl,
+        string? AuthHeader);
 
     // The virtual proxy is now a separate binary (MavenOperator.VirtualProxy).
     // Read its image from the VIRTUAL_PROXY_IMAGE env-var; falls back to the published GHCR image.
@@ -80,7 +87,46 @@ public sealed class VirtualRepositoryReconciler(
             reason: "HtpasswdGenerated",
             message: $"{spec.Auth.Download.Users.Count} download user(s) configured");
 
+        // 2b ── Upload htpasswd Secret (when upload fan-out enabled) ───────────
+        var uploadSpec = spec.Virtual.Upload;
+        bool uploadEnabled = uploadSpec.Targets.Count > 0;
+        string? uploadSyncError = null;
+        List<UploadTargetConfig> resolvedUploadTargets = [];
+
+        if (uploadEnabled)
+        {
+            // Build upload htpasswd for client auth enforcement.
+            var uploadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct);
+            await resources.EnsureSecretAsync(entity, $"{name}-upload-htpasswd",
+                new Dictionary<string, string> { ["upload.htpasswd"] = uploadHtpasswd }, ct);
+
+            // Resolve upload targets with credentials.
+            try
+            {
+                resolvedUploadTargets = await ResolveUploadTargetsAsync(uploadSpec, members, ns, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                uploadSyncError = $"Failed to resolve upload targets: {ex.Message}";
+                uploadEnabled = false;
+                entity.Status.SetCondition("UploadConfigurationError", isTrue: true,
+                    reason: "TargetResolutionFailed", message: uploadSyncError);
+                await events.PublishAsync(entity, "Warning", "UploadTargetsUnresolvable",
+                    $"Could not resolve upload targets for '{name}': {ex.Message}", ct: ct);
+            }
+        }
+
         // 3 ── C# proxy ConfigMap (VirtualRepoConfig JSON) ─────────────────────
+        var uploadConfigObj = uploadEnabled && resolvedUploadTargets.Count > 0
+            ? new
+            {
+                Name = name,
+                Targets = resolvedUploadTargets.Select(t => new { t.Name, t.BaseUrl, t.AuthHeader }).ToArray(),
+                TimeoutSeconds = 30,
+                RetryAttempts = 2,
+            }
+            : null;
+
         var proxyConfig = new
         {
             VirtualRepo = new
@@ -88,6 +134,7 @@ public sealed class VirtualRepositoryReconciler(
                 Name    = name,
                 Members = members.Select(m => new { m.Name, BaseUrl = m.BaseUrl }).ToArray(),
                 MetadataCacheTtlSeconds = spec.Virtual.MetadataCacheTtlSeconds,
+                Upload = uploadConfigObj,
             },
         };
         var proxyConfigJson = JsonSerializer.Serialize(proxyConfig, new JsonSerializerOptions
@@ -110,14 +157,16 @@ public sealed class VirtualRepositoryReconciler(
         await resources.EnsureServiceAsync(entity, $"{name}-proxy-svc", proxyDeplName, ProxyPort, ct);
 
         // 6 ── NGINX ConfigMap (auth_basic front + proxy_pass to C# proxy) ─────
-        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, repositoryPathPrefix);
+        var uploadPolicy = spec.Auth.Upload.Policy;
+        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, uploadPolicy, repositoryPathPrefix, uploadEnabled);
         var nginxCmName   = $"{name}-nginx-cm";
 
         await resources.EnsureConfigMapAsync(entity, nginxCmName,
             new Dictionary<string, string> { ["default.conf"] = nginxConfig }, ct);
 
         // 7 ── NGINX Deployment ────────────────────────────────────────────────
-        var nginxHash     = ComputeHash(nginxConfig + downloadHtpasswd);
+        var uploadHtpasswdForHash = uploadEnabled ? await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct) : string.Empty;
+        var nginxHash     = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswdForHash);
         var nginxPodSpec  = BuildNginxPodSpec(name, spec);
         var nginxDeplName = $"{name}-nginx";
 
@@ -128,6 +177,50 @@ public sealed class VirtualRepositoryReconciler(
 
         entity.Status.SetCondition("Available", isTrue: true,
             reason: "DeploymentEnsured", message: "Virtual repo NGINX + proxy deployments ensured");
+
+        // 8b ── Upload status and target reachability probing ──────────────────
+        if (uploadSpec.Targets.Count > 0)
+        {
+            entity.Status.Upload ??= new UploadStatus();
+            var virtualUploadStatus = new VirtualUploadStatus
+            {
+                Enabled = uploadEnabled,
+                Targets = [],
+            };
+
+            // Probe each target for reachability.
+            foreach (var target in resolvedUploadTargets)
+            {
+                var reachable = await ProbeTargetReachableAsync(target.BaseUrl, ct);
+                virtualUploadStatus.Targets.Add(new VirtualUploadTargetStatus
+                {
+                    Name = target.Name,
+                    Reachable = reachable,
+                    LastError = reachable ? null : "Target unreachable (HEAD probe failed)",
+                });
+            }
+
+            entity.Status.Upload.Virtual = virtualUploadStatus;
+
+            if (uploadEnabled && string.IsNullOrEmpty(uploadSyncError))
+            {
+                var allReachable = virtualUploadStatus.Targets.All(t => t.Reachable);
+                entity.Status.SetCondition("UploadReady", isTrue: true,
+                    reason: allReachable ? "AllTargetsReachable" : "SomeTargetsUnreachable",
+                    message: $"Upload fan-out enabled with {resolvedUploadTargets.Count} target(s) ({virtualUploadStatus.Targets.Count(t => t.Reachable)} reachable)");
+
+                if (allReachable)
+                {
+                    await events.PublishAsync(entity, "Normal", "UploadEnabled",
+                        $"Upload fan-out enabled for '{name}' to {resolvedUploadTargets.Count} target(s)", ct: ct);
+                }
+                else
+                {
+                    await events.PublishAsync(entity, "Warning", "SomeUploadTargetsUnreachable",
+                        $"Some upload targets unreachable for '{name}': {string.Join(", ", virtualUploadStatus.Targets.Where(t => !t.Reachable).Select(t => t.Name))}", ct: ct);
+                }
+            }
+        }
 
         // 9 ── Ingress or Gateway API (optional) ──────────────────────────────
         if (spec.Ingress.Enabled)
@@ -234,24 +327,69 @@ public sealed class VirtualRepositoryReconciler(
 
     /// <summary>
     /// Builds the NGINX config that:
-    /// - Optionally enforces Basic Auth for downloads
-    /// - Rejects PUT/DELETE with 405
-    /// - Proxies all GET/HEAD to the C# aggregation proxy
+    /// - Optionally enforces Basic Auth for downloads and uploads
+    /// - Proxies GET/HEAD to the C# aggregation proxy (read-only behavior)
+    /// - When uploadEnabled is true, also proxies PUT/DELETE/MKCOL through with upload auth enforcement
     /// </summary>
-    private static string RenderNginxVirtualConfig(string name, AuthPolicy downloadPolicy, string repositoryPathPrefix)
+    private static string RenderNginxVirtualConfig(
+        string name,
+        AuthPolicy downloadPolicy,
+        AuthPolicy uploadPolicy,
+        string repositoryPathPrefix,
+        bool uploadEnabled)
     {
-        var authBlock = downloadPolicy == AuthPolicy.Authenticated
-            ? $"""
-                  auth_basic "Maven Virtual Repository";
-                  auth_basic_user_file {AuthPath}/download.htpasswd;
-              """
-            : "  # anonymous download — no auth required";
-
         var locationPrefix = RepositoryPathHelper.ToLocationPrefix(repositoryPathPrefix);
         var regexPrefix = locationPrefix == "/"
             ? "/"
             : System.Text.RegularExpressions.Regex.Escape(locationPrefix);
 
+        // Build auth blocks.
+        string downloadAuthBlock;
+        if (downloadPolicy == AuthPolicy.Authenticated)
+        {
+            downloadAuthBlock = $"auth_basic \"Maven Virtual Repository\";\n" +
+                                $"auth_basic_user_file {AuthPath}/download.htpasswd;";
+        }
+        else
+        {
+            downloadAuthBlock = "# anonymous download — no auth required";
+        }
+
+        string uploadAuthBlock;
+        if (uploadEnabled && uploadPolicy == AuthPolicy.Authenticated)
+        {
+            uploadAuthBlock = $"auth_basic \"Maven Upload - {name}\";\n" +
+                              $"auth_basic_user_file {AuthPath}/upload.htpasswd;";
+        }
+        else
+        {
+            uploadAuthBlock = "";
+        }
+
+        // Build write handling block.
+        string writeHandlingBlock;
+        if (uploadEnabled)
+        {
+            var inner = uploadAuthBlock + "\n" +
+                        "client_max_body_size 512m;\n" +
+                        "proxy_read_timeout 300s;\n" +
+                        "proxy_send_timeout 300s;";
+            writeHandlingBlock = "# Upload forwarding (PUT/DELETE/MKCOL) — proxied to C# fan-out service.\n" +
+                                 "limit_except GET HEAD OPTIONS {\n" +
+                                 Indent(inner, 4) + "\n" +
+                                 "}";
+        }
+        else
+        {
+            writeHandlingBlock = "# Block everything except GET/HEAD — Virtual repositories are read-only.\n" +
+                                 "if ($request_method !~ ^(GET|HEAD)$) {\n" +
+                                 "    return 405 \"Virtual repository does not accept uploads.\\n\";\n" +
+                                 "}";
+        }
+
+        var clientMaxBodySize = uploadEnabled ? "512m" : "1m";
+
+        // Build the full config using double-dollar raw string to escape NGINX braces.
         return $$"""
             server {
                 listen 80;
@@ -263,13 +401,10 @@ public sealed class VirtualRepositoryReconciler(
                     add_header Content-Type text/plain;
                 }
 
-                # Block everything except GET/HEAD — Virtual repositories are read-only.
                 location ~ ^{{regexPrefix}} {
-                    if ($request_method !~ ^(GET|HEAD)$) {
-                        return 405;
-                    }
+                    {{writeHandlingBlock}}
 
-            {{authBlock}}
+                    {{downloadAuthBlock}}
 
                     # Strip the repository path prefix before forwarding to the C# proxy.
                     # The proxy expects bare artifact paths (e.g. "com/example/foo/1.0/foo-1.0.jar").
@@ -280,9 +415,17 @@ public sealed class VirtualRepositoryReconciler(
                     proxy_set_header   Host $host;
                     proxy_set_header   X-Real-IP $remote_addr;
                     proxy_read_timeout 120s;
+
+                    client_max_body_size {{clientMaxBodySize}};
                 }
             }
             """;
+    }
+
+    private static string Indent(string text, int spaces)
+    {
+        var prefix = new string(' ', spaces);
+        return string.Join("\n" + prefix, text.Split('\n'));
     }
 
     private async Task<List<MemberRoute>> ResolveMemberBaseUrlsAsync(
@@ -449,6 +592,99 @@ public sealed class VirtualRepositoryReconciler(
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content));
         return Convert.ToHexStringLower(bytes)[..16];
+    }
+
+    /// <summary>
+    /// Resolves upload targets from spec.virtual.upload.targets by matching target names to member repos,
+    /// and loads credentials (per-target or shared) into base64-encoded Basic auth headers.
+    /// </summary>
+    private async Task<List<UploadTargetConfig>> ResolveUploadTargetsAsync(
+        VirtualUploadSpec uploadSpec,
+        List<MemberRoute> members,
+        string ns,
+        CancellationToken ct)
+    {
+        var resolved = new List<UploadTargetConfig>();
+
+        // Build a lookup from member name to base URL.
+        var memberLookup = members.ToDictionary(m => m.Name, m => m.BaseUrl);
+
+        foreach (var target in uploadSpec.Targets)
+        {
+            if (!memberLookup.TryGetValue(target.Name, out var baseUrl))
+                throw new InvalidOperationException(
+                    $"Upload target '{target.Name}' is not a declared member of this Virtual repository.");
+
+            // Resolve credentials: per-target override first, then shared fallback.
+            string? authHeader = null;
+            var credsRef = target.CredentialsRef ?? uploadSpec.SharedCredentialsRef;
+
+            if (credsRef is not null && !string.IsNullOrWhiteSpace(credsRef.Name))
+            {
+                try
+                {
+                    authHeader = await BuildUpstreamAuthHeaderFromSecretAsync(
+                        credsRef.Name,
+                        string.IsNullOrWhiteSpace(credsRef.Namespace) ? ns : credsRef.Namespace,
+                        ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to load credentials for upload target '{target.Name}' from Secret '{credsRef.Name}': {ex.Message}", ex);
+                }
+            }
+
+            resolved.Add(new UploadTargetConfig(target.Name, baseUrl, authHeader));
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// Probes a target URL with a HEAD request to check reachability.
+    /// </summary>
+    private async Task<bool> ProbeTargetReachableAsync(string baseUrl, CancellationToken ct)
+    {
+        try
+        {
+            using var client = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(5),
+            };
+
+            // HEAD the root of the repository to check if it's responding.
+            using var response = await client.GetAsync(baseUrl.TrimEnd('/') + "/", HttpCompletionOption.ResponseHeadersRead, ct);
+            return response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NotFound;
+        }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "[Virtual] Target probe failed for {BaseUrl}", baseUrl);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Loads a credential Secret and returns a base64-encoded Basic auth header.
+    /// </summary>
+    private async Task<string> BuildUpstreamAuthHeaderFromSecretAsync(
+        string secretName,
+        string ns,
+        CancellationToken ct)
+    {
+        var secret = await k8s.GetAsync<V1Secret>(secretName, ns, ct)
+            ?? throw new InvalidOperationException($"Credential Secret '{secretName}' not found in namespace '{ns}'.");
+
+        var username = GetSecretKey(secret, "username", secretName);
+        var password = GetSecretKey(secret, "password", secretName);
+
+        var credentials = $"{username}:{password}";
+        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
+        return $"Basic {encoded}";
     }
 }
 
