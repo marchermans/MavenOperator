@@ -55,8 +55,8 @@ spec:
                 # Ingress: tlsSecretRef and certManager cannot both be set.
                 - rule: "!(has(self.ingress) && has(self.ingress.tlsSecretRef) && self.ingress.tlsSecretRef != '' && has(self.ingress.certManager))"
                   message: "spec.ingress.tlsSecretRef and spec.ingress.certManager cannot both be set"
-                # Proxy upload enabled → upstreamCredentialsRef.name must be present (simplified).
-                - rule: "!has(self.upstream.upload) || !self.upstream.upload.enabled || self.upstream.upload.upstreamCredentialsRef.name != ''"
+                # Proxy upload enabled → upstreamCredentialsRef.name must be present.
+                - rule: "!has(self.upstream) || !has(self.upstream.upload) || !self.upstream.upload.enabled || self.upstream.upload.upstreamCredentialsRef.name != ''"
                   message: "spec.upstream.upload.upstreamCredentialsRef.name is required when proxy upload is enabled"
               properties:
                 type:
