@@ -224,4 +224,75 @@ public sealed class NginxConfigRendererTests
         // Write operations bypass cache (inside limit_except)
         result.ShouldContain("proxy_cache off;");
     }
+
+    [Fact]
+    public void RenderProxy_UploadEnabled_IncludesErrorHandlingForUpstreamRejection()
+    {
+        var upstreamCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("deployer:s3cr3t"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Passthrough,
+            uploadPolicy: AuthPolicy.Authenticated,
+            upstreamUploadAuthHeader: $"Basic {upstreamCreds}");
+
+        // proxy_intercept_errors must be enabled for error mapping to work
+        result.ShouldContain("proxy_intercept_errors on;");
+
+        // Error page directives map upstream 401/403 to internal handler
+        result.ShouldContain("error_page 401 = @upload_upstream_error;");
+        result.ShouldContain("error_page 403 = @upload_upstream_error;");
+
+        // Internal error handler returns helpful message without leaking credentials
+        result.ShouldContain("location @upload_upstream_error {");
+        result.ShouldContain("internal;");
+        result.ShouldContain("return 502 \"Upstream rejected upload");
+    }
+
+    [Fact]
+    public void RenderProxy_UploadDisabled_NoErrorHandlingDirectives()
+    {
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Anonymous,
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            string.Empty,
+            uploadEnabled: false);
+
+        // No error handling when uploads are disabled
+        result.ShouldNotContain("proxy_intercept_errors on;");
+        result.ShouldNotContain("@upload_upstream_error");
+    }
+
+    [Fact]
+    public void RenderProxy_OverrideMode_WithExplicitUploadCredentials_ForwardsCorrectly()
+    {
+        var readCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("reader:pass"));
+        var uploadCreds = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("deployer:s3cr3t"));
+        var result = _sut.RenderProxy(
+            "my-proxy",
+            AuthPolicy.Authenticated, // Download requires auth
+            "https://repo1.maven.org/maven2/",
+            "1d",
+            $"Basic {readCreds}", // Read credentials
+            uploadEnabled: true,
+            uploadMode: ProxyUploadMode.Override,
+            uploadPolicy: AuthPolicy.Authenticated, // Would require auth in Passthrough mode
+            upstreamUploadAuthHeader: $"Basic {uploadCreds}");
+
+        // Override mode skips client auth for uploads even with Authenticated policy
+        result.ShouldContain("limit_except GET HEAD OPTIONS");
+        result.ShouldNotContain("auth_basic \"Maven Upload - my-proxy\"");
+
+        // Uses dedicated upload credentials (not read credentials) for forwarding
+        result.ShouldContain($"proxy_set_header Authorization \"Basic {uploadCreds}\"");
+
+        // Download auth is still enforced separately (outside limit_except)
+        result.ShouldContain("auth_basic \"Maven Proxy - my-proxy\"");
+    }
 }

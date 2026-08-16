@@ -186,6 +186,9 @@ server {
 
         # ── Upload forwarding (PUT/DELETE/MKCOL) ────────────────────────────
         {{ if upload_enabled -}}
+        # Intercept upstream errors for write operations to return helpful messages.
+        proxy_intercept_errors on;
+
         limit_except GET HEAD OPTIONS {
             # Client auth for uploads (Passthrough mode only)
             {{ if upload_mode == "Passthrough" }}{{ if upload_policy == "Authenticated" -}}
@@ -202,7 +205,20 @@ server {
             {{ else if upstream_auth_header != "" -}}
             proxy_set_header Authorization "{{ upstream_auth_header }}";
             {{ end -}}
+
+            # Map upstream auth errors to a helpful 502 response.
+            error_page 401 = @upload_upstream_error;
+            error_page 403 = @upload_upstream_error;
         }
         {{ end -}}
     }
+
+    # ── Upload error handler (internal) ───────────────────────────────────────
+    {{ if upload_enabled -}}
+    location @upload_upstream_error {
+        internal;
+        default_type text/plain;
+        return 502 "Upstream rejected upload — check credentials or permissions.\n";
+    }
+    {{ end -}}
 }
