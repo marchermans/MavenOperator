@@ -23,8 +23,12 @@ Prometheus metrics.
   - [Virtual repository](#virtual-repository)
   - [Authentication](#authentication)
   - [Exposing via Ingress](#exposing-via-ingress)
+  - [Exposing via Gateway API](#exposing-via-gateway-api)
+  - [Proxy upload forwarding](#proxy-upload-forwarding)
+  - [Virtual upload fan-out](#virtual-upload-fan-out)
   - [Using with Maven](#using-with-maven)
   - [Using with Gradle](#using-with-gradle)
+- [Importing existing repositories](#importing-existing-repositories-mavenrepositoryimport)
 - [Status & conditions](#status--conditions)
 - [Metrics](#metrics)
 - [Development](#development)
@@ -59,13 +63,18 @@ Use this for internal snapshots and releases.
 ### Proxy
 Caches artifacts from a remote upstream (e.g. Maven Central) via NGINX
 `proxy_pass`. Downloads are transparently forwarded and cached locally.
+Optionally, uploads can be **forwarded to the upstream** using fixed server
+credentials (`spec.upstream.upload`) — see [Proxy upload forwarding](#proxy-upload-forwarding).
 
 ### Virtual
 Aggregates multiple Hosted and/or Proxy repositories.  
 - Requests are fanned out to all members in parallel.  
 - `maven-metadata.xml` responses are **merged** across all members, so
   your build tool always sees the union of available versions.  
-- Uploads are forbidden (`405 Method Not Allowed`) — upload directly to a Hosted member.
+- Optional **upload fan-out**: `mvn deploy` against the Virtual URL distributes
+  artifacts in parallel to a configured subset of members (Hosted, or Proxy with
+  forwarding enabled). Without targets configured, uploads return `405`
+  — see [Virtual upload fan-out](#virtual-upload-fan-out).
 
 ---
 
@@ -195,10 +204,40 @@ spec:
       policy: Anonymous
     upload:
       policy: Authenticated
-      users:                  # upload == refresh cache on-demand (optional)
+      users:                  # client-side upload policy (Passthrough mode only)
         - secretRef: admin-credentials
           role: Deployer
 ```
+
+#### Proxy upload forwarding
+
+By default a proxy is read-only. Enable `spec.upstream.upload` to forward
+PUT/DELETE/MKCOL requests to the upstream using fixed server credentials:
+
+```yaml
+spec:
+  type: Proxy
+  upstream:
+    url: https://artifacts.example.com/maven/releases
+    upload:
+      enabled: true
+      mode: Passthrough            # Passthrough | Override (default: Passthrough)
+      upstreamCredentialsRef:
+        name: upstream-deployer-creds   # Secret with username + password keys
+```
+
+| Mode | Client auth on writes | Use case |
+|------|----------------------|----------|
+| `Passthrough` | Enforced by the repo's `auth.upload` policy | Normal day-to-day deploys through the proxy. |
+| `Override` | Skipped entirely (upstream creds always applied) | Migration tooling that has no client credentials. |
+
+Safety guard: if the proxy is externally exposed (Service of type
+LoadBalancer/NodePort, or routed via Ingress/Gateway), upload forwarding is
+**disabled by default**. Set `forceAllowOnExternal: true` to override.
+The reconciler emits an `UploadBlockedExternallyExposed` event and a status
+condition when it blocks uploads this way. Upstream 401/403 responses are
+collapsed into a generic `502 "Upstream rejected upload"` so upstream
+credentials never leak into error bodies.
 
 ---
 
@@ -225,6 +264,39 @@ spec:
 
 Point your build tools at `public` and they transparently resolve artifacts from
 both `releases` and `maven-central-cache`.
+
+#### Virtual upload fan-out
+
+Add `spec.virtual.upload.targets` to distribute uploads across members:
+
+```yaml
+spec:
+  type: Virtual
+  virtual:
+    members:
+      - name: releases
+        namespace: my-repos
+      - name: snapshots
+        namespace: my-repos
+    upload:
+      targets:
+        - name: releases                 # must match a member above
+          credentialsRef:                # optional per-target override
+            name: deploy-credentials
+        - name: snapshots                # falls back to sharedCredentialsRef
+      sharedCredentialsRef:
+        name: shared-deploy-creds
+  auth:
+    upload:
+      policy: Authenticated              # client-side auth enforced before fan-out
+```
+
+- Each PUT is sent **in parallel** to every target; a single failing target
+  yields `207` with per-target details in the logs (others still succeed).
+- Hosted targets store directly; Proxy targets require `spec.upstream.upload.enabled: true`
+  on that member so they can forward onward.
+- The reconciler probes each target and reports reachability plus the last
+  successful upload time under `status.upload.virtual.targets[*]`.
 
 ---
 
@@ -331,6 +403,30 @@ WebDAV (PUT/DELETE) pass-through on Hosted repos.
 
 ---
 
+### Exposing via Gateway API
+
+Clusters running a Gateway API implementation (e.g. Envoy Gateway, Istio)
+can use `spec.gateway` instead of Ingress:
+
+```yaml
+spec:
+  # ... (type, storage, auth as above)
+  gateway:
+    enabled: true
+    gatewayRef:
+      name: main-gateway               # existing Gateway resource (required)
+      namespace: istio-system           # optional; defaults to repo's namespace
+    hostname: maven.example.com
+    tlsSecretRef: maven-tls             # OR certManager — not both
+```
+
+- The operator creates a `gateway.networking.k8s.io/v1` **HTTPRoute** with an
+  owner reference (deleting the CR deletes the route) and sets `status.url`
+  from hostname + path.
+- TLS can come from a pre-created Secret (`tlsSecretRef`) or cert-manager
+  issuer annotations on the HTTPRoute (`certManager`).
+- Mutually exclusive with `spec.ingress` — enabled at the same time is rejected by CEL validation.
+
 ### Custom repository path prefix
 
 By default, repositories are served under `/repository/<name>`. You can override
@@ -429,6 +525,49 @@ publishing {
 
 ---
 
+## Importing existing repositories (MavenRepositoryImport)
+
+Migrate artifacts from an existing repository into a Hosted repo managed by
+the operator. Declare a `MavenRepositoryImport` resource; the controller
+launches a one-shot Job that performs the transfer and tracks progress in
+`status`.
+
+```yaml
+apiVersion: maven.operator.io/v1alpha1
+kind: MavenRepositoryImport
+metadata:
+  name: migrate-legacy
+  namespace: my-repos
+spec:
+  targetRepository: releases            # Hosted repo in the same namespace
+  source:
+    pvcSnapshot:
+      claimName: legacy-repo-backup     # snapshot/backup PVC of the old repo
+      reposiliteLayout: true            # strip leading /<repository>/ segment
+  filters:
+    includeGroupIds: [com.example]
+  options:
+    parallelism: 8
+```
+
+Three source modes (exactly one must be set — enforced by CEL):
+
+| Mode | `source` field | How it works |
+|------|----------------|--------------|
+| **A — API crawl** | `api` (Reposilite or JFrog Cloud) | Recursively lists artifacts via REST, writes bytes directly to the target PVC (no HTTP hop). Supports `sinceTimestamp`, retry with backoff. |
+| **B — Snapshot clone** | `pvcSnapshot` | Filesystem walk of a mounted source/backup PVC; strips Reposilite layout paths; skips `maven-metadata.xml`. |
+| **C — Live PVC clone** | `pvcLive` | Mounts the live Reposilite PVC. Optionally scales the Reposilite Deployment to 0 first (`scaleDownDuration`, default `60s`; `0s` = concurrent, requires RWX). A finalizer always restores replicas on CR deletion. |
+
+Notes:
+- Target storage defaults to **ReadWriteMany** so Mode A can write directly into
+  the repo PVC without an HTTP round-trip.
+- The Job patches `status.artifactsCopied` as it progresses; failures surface
+  via conditions and Kubernetes Events.
+- A k6 comparison suite (`MavenOperator.Tests.Performance/k6/comparison/`) is
+  available to benchmark MavenOperator vs Reposilite for download/upload/metadata workloads.
+
+---
+
 ## Status & conditions
 
 The operator writes reconciliation state back into `status`:
@@ -481,6 +620,8 @@ Both the operator and the virtual proxy expose Prometheus metrics.
 | `virtual_proxy_member_request_duration_seconds` | Histogram | `repo_name`, `member_name`, `success` | Per-member fetch latency |
 | `virtual_proxy_metadata_merge_duration_seconds` | Histogram | `repo_name` | `maven-metadata.xml` merge latency |
 | `virtual_proxy_metadata_merge_member_count` | Histogram | `repo_name` | Members queried per merge |
+| `virtual_proxy_upload_requests_total` | Counter | `repo`, `target`, `status` | Upload fan-out requests per target |
+| `virtual_proxy_upload_duration_seconds` | Histogram | `repo`, `target` | Per-target upload latency |
 
 `asset_type` is one of: `jar`, `pom`, `metadata`, `checksum`, `other`.
 
@@ -501,7 +642,6 @@ helm upgrade maven-operator oci://ghcr.io/marchermans/charts/maven-operator \
 
 ```
 MavenOperator/
-├── VERSION                          # Base semver (bump before tagging a release)
 ├── config/crds/                     # Generated CRD YAML (committed)
 ├── charts/maven-operator/           # Helm chart
 ├── MavenOperator/                   # Operator (KubeOps, .NET 10)
@@ -510,7 +650,9 @@ MavenOperator/
 │   ├── Reconcilers/                 # One reconciler per repo type
 │   ├── Services/                    # NginxConfigRenderer, HtpasswdService, …
 │   └── Templates/                   # Scriban NGINX config templates
-├── MavenOperator.VirtualProxy/      # Virtual-repo aggregation proxy
+├── MavenOperator.VirtualProxy/      # Virtual-repo aggregation proxy (+ upload fan-out)
+├── MavenOperator.AuthProxy/         # OIDC (CI trust) + htpasswd auth sidecar
+├── MavenOperator.ImportJob/         # One-shot import Job (API crawl / PVC clone)
 ├── MavenOperator.Tests.Unit/        # Pure unit tests (no cluster)
 ├── MavenOperator.Tests.Unit.VirtualProxy/
 ├── MavenOperator.Tests.Integration/ # Reconciler tests against k3d
@@ -652,5 +794,9 @@ ConfigMaps, and Secrets (except PVCs when `deletionPolicy: Retain`).
 | 5 | ✅ Done | Prometheus metrics, Helm chart, GitHub Actions CI |
 | 6A | ✅ Done | **Deep observability** — per-artifact NGINX metrics via `nginx-prometheus-exporter` + `mtail` sidecars; `PodMonitor`; Grafana dashboards; PrometheusRule alert rules |
 | 6B | ✅ Done | **Enhanced authentication** — role-based access (reader/deployer/admin); CI platform OIDC trust (GitHub Actions & GitLab CI JWTs, no pre-provisioned secrets); per-artifact-path ACLs |
-| 7  | 🔜 Planned | **Import & Migration** — `MavenRepositoryImport` CRD; three transfer modes: (A) REST API crawl from Reposilite/JFrog Cloud → direct PVC write (no HTTP round-trip), (B) offline PVC snapshot clone, (C) live Reposilite PVC clone with optional scale-down; RWX storage promoted to default; k6 comparison benchmarks proving MavenOperator matches or beats Reposilite throughput |
+| 7  | 🟡 Mostly done | **Import & Migration** — `MavenRepositoryImport` CRD + controller, all three transfer modes (A) API crawl from Reposilite/JFrog Cloud → direct PVC write, (B) snapshot/external PVC clone, (C) live Reposilite PVC clone with optional scale-down + finalizer restore; RWX storage default; k6 comparison scripts. Remaining: import integration/E2E tests, `ImportThroughputBenchmark`, CI gate on the k6 comparison |
+| 8  | 🟡 Mostly done | **Gateway API** — `spec.gateway` creates a Gateway API v1 `HTTPRoute` against an existing Gateway (cert-manager TLS supported), CEL validation and RBAC wired in. Remaining: integration/E2E tests through a live gateway implementation |
+| U  | 🟡 In progress | **Uploads for Proxy & Virtual** — proxy upload forwarding (`Passthrough`/`Override`, external-exposure guard, safe error mapping) and virtual fan-out (per-target credentials, reachability + last-success status, metrics) implemented; final polish in flight. Remaining: proxy-upload E2E tests, dashboard panels, admission-webhook validation |
+
+Legend: ✅ done · 🟡 mostly done / in progress — detailed task checklists live in [`.agent/plan/mvp`](./.agent/plan/mvp/) and [`.agent/plan/upload`](./.agent/plan/upload/).
 
