@@ -345,9 +345,6 @@ public sealed class VirtualRepositoryReconciler(
         bool uploadEnabled)
     {
         var locationPrefix = RepositoryPathHelper.ToLocationPrefix(repositoryPathPrefix);
-        var regexPrefix = locationPrefix == "/"
-            ? "/"
-            : System.Text.RegularExpressions.Regex.Escape(locationPrefix);
 
         // Build auth blocks.
         string downloadAuthBlock;
@@ -406,16 +403,18 @@ public sealed class VirtualRepositoryReconciler(
                     add_header Content-Type text/plain;
                 }
 
-                location ~ ^{{regexPrefix}} {
+                location {{locationPrefix}} {
                     {{writeHandlingBlock}}
 
                     {{downloadAuthBlock}}
 
                     # Strip the repository path prefix before forwarding to the C# proxy.
                     # The proxy expects bare artifact paths (e.g. "com/example/foo/1.0/foo-1.0.jar").
-                    rewrite ^{{regexPrefix}}(.*)$ /$1 break;
-
-                    proxy_pass         http://{{name}}-proxy-svc:{{ProxyPort}};
+                    # URI-form proxy_pass replaces the matched location prefix with "/" for ALL methods
+                    # (GET, PUT, DELETE, ...). We deliberately do NOT use `rewrite ... break;` here:
+                    # a limit_except block in the same location silently suppresses rewrites for the
+                    # unlisted methods (empirically verified), which corrupted upload fan-out paths.
+                    proxy_pass         http://{{name}}-proxy-svc:{{ProxyPort}}/;
                     proxy_http_version 1.1;
                     proxy_set_header   Host $host;
                     proxy_set_header   X-Real-IP $remote_addr;
@@ -624,6 +623,8 @@ public sealed class VirtualRepositoryReconciler(
                     $"Upload target '{target.Name}' is not a declared member of this Virtual repository.");
 
             // Validate target type: only Hosted or Proxy with uploads enabled are allowed.
+            string? baseUrlOverride = null;
+
             switch (memberRoute.Type)
             {
                 case RepositoryType.Hosted:
@@ -636,6 +637,13 @@ public sealed class VirtualRepositoryReconciler(
                         throw new InvalidOperationException(
                             $"Upload target '{target.Name}' is a Proxy repository but does not have upload forwarding enabled. " +
                             $"Set spec.upstream.upload.enabled: true on the target repository.");
+                    // Fan out DIRECTLY to the remote upstream URL using the target's credentials,
+                    // bypassing our own NGINX proxy stack. This is deliberate: a limit_except block in
+                    // the same location suppresses rewrites for unlisted methods (PUT/DELETE) and nginx
+                    // forbids URI-form proxy_pass with variables, so reliable write-path mapping through
+                    // our proxy NGINX is not possible. The target's credentials authenticate against
+                    // the REMOTE repository.
+                    baseUrlOverride = proxyRepo.Spec.Upstream.Url;
                     break;
 
                 case RepositoryType.Virtual:
@@ -648,7 +656,7 @@ public sealed class VirtualRepositoryReconciler(
                         $"Upload target '{target.Name}' has unsupported type '{memberRoute.Type}'.");
             }
 
-            var baseUrl = memberRoute.BaseUrl;
+            var baseUrl = baseUrlOverride ?? memberRoute.BaseUrl;
 
             // Resolve credentials: per-target override first, then shared fallback.
             string? authHeader = null;

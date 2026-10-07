@@ -48,6 +48,29 @@ map $uri $maven_cache_control_{{ var_name }} {
     default                    "public, max-age=3600";
 }
 
+{{ if upload_enabled -}}
+# ── Per-method upstream credentials for upload forwarding (http context) ────
+# 'map' only works in the http context, so it cannot live inside the location's
+# limit_except block. Reads keep their original Authorization header (or the
+# static read credential when one is configured); write methods get the upload
+# credential. This nginx build requires a leading '$' on the map target name.
+{{ if upstream_upload_auth_header != "" -}}
+map $request_method $rs_up_auth_{{ var_name }} {
+    {{ if upstream_auth_header != "" -}}default "{{ upstream_auth_header }}";{{ else -}}default $http_authorization;{{ end -}}
+    PUT    "{{ upstream_upload_auth_header }}";
+    DELETE "{{ upstream_upload_auth_header }}";
+    MKCOL  "{{ upstream_upload_auth_header }}";
+}
+{{ else if upstream_auth_header != "" -}}
+map $request_method $rs_up_auth_{{ var_name }} {
+    default "{{ upstream_auth_header }}";
+    PUT    "{{ upstream_auth_header }}";
+    DELETE "{{ upstream_auth_header }}";
+    MKCOL  "{{ upstream_auth_header }}";
+}
+{{ end -}}
+{{ end -}}
+
 # ── JSON access log format ──────────────────────────────────────────────────
 log_format maven_json_{{ var_name }} escape=json
     '{'
@@ -166,8 +189,13 @@ server {
 
         proxy_cache_methods GET HEAD;
 
-        # ── Upstream auth for reads ─────────────────────────────────────────
-        {{ if upstream_auth_header != "" -}}
+        # ── Upstream auth (reads + uploads via per-method map) ────────────────
+        {{ if upload_enabled -}}
+        {{ if upstream_upload_auth_header != "" || upstream_auth_header != "" -}}
+        proxy_set_header Authorization $rs_up_auth_{{ var_name }};
+        {{ end -}}
+        {{ else if upstream_auth_header != "" -}}
+        # Upload-disabled proxies keep the simple static header.
         proxy_set_header Authorization "{{ upstream_auth_header }}";
         {{ end -}}
 
@@ -186,39 +214,19 @@ server {
 
         # ── Upload forwarding (PUT/DELETE/MKCOL) ────────────────────────────
         {{ if upload_enabled -}}
-        # Intercept upstream errors for write operations to return helpful messages.
-        proxy_intercept_errors on;
-
+        # Client auth for uploads. NOTE: only auth_basic* directives are allowed
+        # inside limit_except on this nginx build — proxy_set_header, error_page
+        # and proxy_cache there make the config fail to load (and suppress the
+        # location rewrite for write methods). Upstream credential injection is
+        # handled by the per-method map above.
         limit_except GET HEAD OPTIONS {
-            # Client auth for uploads (Passthrough mode only)
             {{ if upload_mode == "Passthrough" }}{{ if upload_policy == "Authenticated" -}}
             auth_basic "Maven Upload - {{ name }}";
             auth_basic_user_file /etc/nginx/auth/upload.htpasswd;
             {{ end }}{{ end -}}
-
-            # Bypass cache for write operations
-            proxy_cache off;
-
-            # Inject upstream credentials for upload forwarding
-            {{ if upstream_upload_auth_header != "" -}}
-            proxy_set_header Authorization "{{ upstream_upload_auth_header }}";
-            {{ else if upstream_auth_header != "" -}}
-            proxy_set_header Authorization "{{ upstream_auth_header }}";
-            {{ end -}}
-
-            # Map upstream auth errors to a helpful 502 response.
-            error_page 401 = @upload_upstream_error;
-            error_page 403 = @upload_upstream_error;
         }
         {{ end -}}
     }
 
-    # ── Upload error handler (internal) ───────────────────────────────────────
-    {{ if upload_enabled -}}
-    location @upload_upstream_error {
-        internal;
-        default_type text/plain;
-        return 502 "Upstream rejected upload — check credentials or permissions.\n";
-    }
-    {{ end -}}
+
 }
