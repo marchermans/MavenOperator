@@ -38,7 +38,9 @@
 #
 # ENVIRONMENT
 #   K3D_CLUSTER_NAME   Override cluster name (alternative to --cluster).
-#   K3D_AGENTS         Number of k3d agent nodes (default: 2 locally, 1 in CI).
+#   K3D_AGENTS         Number of k3d agent nodes (default: 0 = single node; 1 in
+#                      CI). Single-node by default so import Job pods and repo
+#                      NGINX share an RWO PVC on the same node.
 #                      Raise this on beefy dev machines for more scheduling headroom.
 #   K3D_MAX_PODS       Max pods per node (default: 250). Raised from k3s default of
 #                      110 to accommodate the full integration + e2e + import test matrix.
@@ -51,6 +53,16 @@
 #                      The script sets this automatically when it successfully
 #                      pre-loads ghcr.io/google/mtail:latest into k3d.
 #                      If unset and the image cannot be pulled, those tests skip.
+#   GATEWAY_E2E_TESTS  Set to 'true' to force-enable Gateway API E2E tests. The
+#                      script sets this automatically when it installs Envoy
+#                      Gateway into a self-managed k3d cluster; external-cluster
+#                      users must set it themselves only if their cluster has a
+#                      working Gateway API data plane.
+#   IMPORT_DIRECT_WRITE_TESTS  Set to 'true' to enable import tests that mount
+#                      the target PVC directly from a Job pod. The script sets
+#                      this automatically for self-managed single-node clusters;
+#                      external-cluster users must set it only if their cluster is
+#                      single-node or has RWX-capable storage.
 #
 # EXAMPLES
 #   ./scripts/run-tests.sh                      # run unit tests only
@@ -257,7 +269,14 @@ run_integration() {
   # Spin up k3d only if no external KUBECONFIG was supplied by the caller.
   if [[ -z "${_EXTERNAL_KUBECONFIG}" ]]; then
     cluster_up
+    # Free CPU on the single node: drop namespaces left over from interrupted runs.
+    cluster_cleanup_stale_test_namespaces
     cluster_apply_crds
+    # Phase 7/8 test prerequisites (only for clusters we own):
+    #   - Gateway API CRDs so spec.gateway integration tests can create HTTPRoutes
+    #   - in-cluster import job image for the MavenRepositoryImport controller
+    cluster_apply_gateway_crds
+    cluster_load_import_job_image
   else
     log_info "Using existing KUBECONFIG: ${KUBECONFIG}"
     cluster_apply_crds
@@ -265,6 +284,15 @@ run_integration() {
 
   # Export KUBECONFIG so the child dotnet process inherits it automatically.
   export KUBECONFIG
+
+  # Point the in-process import controller at the locally-built job image.
+  [[ -n "${IMPORT_JOB_IMAGE_IN_CLUSTER:-}" ]] && export IMPORT_JOB_IMAGE="${IMPORT_JOB_IMAGE_IN_CLUSTER}"
+
+  # Import direct-write tests need NGINX and the import Job on the same node
+  # (RWO PVC). Self-managed clusters are single-node by default — enable there;
+  # external KUBECONFIG users must set IMPORT_DIRECT_WRITE_TESTS themselves only
+  # if their cluster is single-node or has RWX-capable storage.
+  [[ -z "${_EXTERNAL_KUBECONFIG}" && "${K3D_AGENTS:-0}" == "0" ]] && export IMPORT_DIRECT_WRITE_TESTS="${IMPORT_DIRECT_WRITE_TESTS:-true}"
 
   run_dotnet_test "MavenOperator.Tests.Integration" "Integration" "INTEGRATION_TESTS=true"
 }
@@ -286,10 +314,19 @@ run_e2e() {
   if [[ -z "${_EXTERNAL_KUBECONFIG}" ]]; then
     # We own the cluster lifecycle — bring it up (idempotent) and deploy the operator.
     cluster_up
+    # Free CPU on the single node: drop namespaces left over from interrupted runs.
+    cluster_cleanup_stale_test_namespaces
     cluster_apply_crds
+    # Phase 7/8 test prerequisites:
+    #   - Envoy Gateway as the Gateway API data plane (also installs Gateway CRDs)
+    cluster_install_envoy_gateway
+    # Reached only on success (the installer exits non-zero otherwise), so it is
+    # safe to enable the gateway E2E tests from here.
+    export GATEWAY_E2E_TESTS="${GATEWAY_E2E_TESTS:-true}"
     cluster_apply_rbac
     cluster_load_operator_image
     cluster_load_virtual_proxy_image
+    cluster_load_import_job_image
     cluster_deploy_operator
   else
     log_info "Using external KUBECONFIG: ${KUBECONFIG}"
@@ -298,6 +335,16 @@ run_e2e() {
 
   # Export KUBECONFIG so the child dotnet process inherits it automatically.
   export KUBECONFIG
+
+  # The operator creates import Jobs — point its controller at the locally-built
+  # job image (loaded into k3d by cluster_load_import_job_image above).
+  [[ -n "${IMPORT_JOB_IMAGE_IN_CLUSTER:-}" ]] && export IMPORT_JOB_IMAGE="${IMPORT_JOB_IMAGE_IN_CLUSTER}"
+
+  # Import direct-write tests need NGINX and the import Job on the same node
+  # (RWO PVC). Self-managed clusters are single-node by default — enable there;
+  # external KUBECONFIG users must set IMPORT_DIRECT_WRITE_TESTS themselves only
+  # if their cluster is single-node or has RWX-capable storage.
+  [[ -z "${_EXTERNAL_KUBECONFIG}" && "${K3D_AGENTS:-0}" == "0" ]] && export IMPORT_DIRECT_WRITE_TESTS="${IMPORT_DIRECT_WRITE_TESTS:-true}"
 
   # ── Try to pre-load the mtail image so metrics E2E tests can run ────────────
   # If the image can be pulled and imported into k3d, set METRICS_E2E_TESTS=true.

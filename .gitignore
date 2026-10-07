@@ -8,3 +8,6 @@ riderModule.iml
 .tmp/
 .benchmarks/
 *.user
+# Local tooling state (not part of the project)
+.memory/
+BenchmarkDotNet.Artifacts/

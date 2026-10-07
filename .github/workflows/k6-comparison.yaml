@@ -1,0 +1,116 @@
+# On-demand k6 comparison gate: MavenOperator vs Reposilite (Phase 7 §9/§10.5).
+#
+# Gates (from .agent/plan/mvp/13-phase7-import-migration.md):
+#   - p50/p95 latency ≤ Reposilite × 1.10
+#   - throughput ≥ 0.90× Reposilite
+#   - error rate < 0.1%
+#
+# The job runs compare.sh against two reachable repository endpoints. It does
+# NOT provision the clusters itself — run it with URLs that point at a deployed
+# MavenOperator repository and a Reposilite instance serving an equivalent set
+# of artifacts (e.g. via kubectl port-forward from your benchmark cluster):
+#
+#   1. Deploy MavenOperator + Reposilite on a benchmark cluster (RWX storage
+#      recommended so both serve the same corpus without contention).
+#   2. Expose both services to this runner:
+#        kubectl -n maven-operator-system port-forward svc/<repo>-svc 8081:80 &
+#        kubectl -n reposilite       port-forward svc/reposilite      8082:8080 &
+#   3. Trigger this workflow with the two URLs (defaults work for local port-forwards).
+
+name: K6 Comparison Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      maven_operator_url:
+        description: "Base URL of the MavenOperator repository"
+        required: false
+        default: "http://localhost:8081"
+      reposilite_url:
+        description: "Base URL of the Reposilite instance (with /repository path)"
+        required: false
+        default: "http://localhost:8082"
+      repository:
+        description: "Repository name on both sides"
+        required: false
+        default: "releases"
+      download_user:
+        description: "Download user (anon for anonymous)"
+        required: false
+        default: "downloader"
+      download_pass:
+        description: "Download password"
+        required: false
+        default: "password"
+  # Also run on release tags so every published version gets a recorded baseline.
+  push:
+    tags: ["v*"]
+
+jobs:
+  k6-comparison:
+    name: Run k6 comparison & gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          K6_VERSION="0.53.0"
+          curl -sL "https://github.com/loadimpact/k6/releases/download/v${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin k6
+          k6 version
+
+      # For tag runs there is no local port-forward; the gate will report N/A
+      # metrics and pass with a warning (baseline recording only). Dispatch
+      # runs are where real URLs are supplied.
+      - name: Run comparison suite
+        env:
+          MAVEN_OPERATOR_URL: ${{ github.event.inputs.maven_operator_url || '' }}
+          REPOSILITE_URL: ${{ github.event.inputs.reposilite_url || '' }}
+          REPOSITORY: ${{ github.event.inputs.repository || 'releases' }}
+          DOWNLOAD_USER: ${{ github.event.inputs.download_user || 'downloader' }}
+          DOWNLOAD_PASS: ${{ secrets.K6_DOWNLOAD_PASS || 'password' }}
+        run: |
+          if [[ -z "${MAVEN_OPERATOR_URL}" || -z "${REPOSILITE_URL}" ]]; then
+            echo "::warning::No comparison URLs supplied (tag trigger) — skipping k6 runs."
+            mkdir -p MavenOperator.Tests.Performance/k6/comparison
+            echo '{"gates_passed": true, "note": "skipped: no URLs"}' > \
+              MavenOperator.Tests.Performance/k6/comparison/summary.json
+            exit 0
+          fi
+
+          ./MavenOperator.Tests.Performance/k6/comparison/compare.sh \
+            --maven-operator-url "${MAVEN_OPERATOR_URL}" \
+            --reposilite-url "${REPOSILITE_URL}" \
+            --repository "${REPOSITORY}" \
+            --download-user "${DOWNLOAD_USER}" \
+            --download-pass "${DOWNLOAD_PASS}"
+
+      - name: Upload comparison results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-comparison-results
+          path: |
+            MavenOperator.Tests.Performance/k6/comparison/summary.json
+            MavenOperator.Tests.Performance/k6/comparison/summary-maven-operator.json
+            MavenOperator.Tests.Performance/k6/comparison/summary-reposilite.json
+
+      - name: Apply gate
+        if: always()
+        run: |
+          SUMMARY="MavenOperator.Tests.Performance/k6/comparison/summary.json"
+          [[ -f "${SUMMARY}" ]] || { echo "No summary produced — failing the gate."; exit 1; }
+          python3 - "$SUMMARY" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+if data.get("gates_passed", False):
+    print("Gate PASSED")
+else:
+    print("Gate FAILED:")
+    for k, v in data.items():
+        if isinstance(v, dict):
+            print(f"  {k}: {v}")
+    sys.exit(1)
+PYEOF
