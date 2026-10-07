@@ -21,7 +21,8 @@ public interface IGatewayApiService
         int servicePort,
         GatewaySpec gatewaySpec,
         string repositoryName,
-        string? defaultPathPrefix = null);
+        string? defaultPathPrefix = null,
+        string? ownerUid = null);
 }
 /// <inheritdoc/>
 public sealed class GatewayApiService : IGatewayApiService
@@ -36,7 +37,8 @@ public sealed class GatewayApiService : IGatewayApiService
         int servicePort,
         GatewaySpec gatewaySpec,
         string repositoryName,
-        string? defaultPathPrefix = null)
+        string? defaultPathPrefix = null,
+        string? ownerUid = null)
     {
         var path = gatewaySpec.Path ?? RepositoryPathHelper.ResolvePathPrefix(defaultPathPrefix, repositoryName);
         var gatewayNamespace = gatewaySpec.GatewayRef.Namespace ?? @namespace;
@@ -59,6 +61,22 @@ public sealed class GatewayApiService : IGatewayApiService
             ["namespace"] = @namespace,
             ["labels"] = labels,
         };
+        if (!string.IsNullOrWhiteSpace(ownerUid))
+        {
+            // Owner reference so the API server garbage-collects the route when
+            // the owning MavenRepository is deleted.
+            metadata["ownerReferences"] = new List<Dictionary<string, object?>>
+            {
+                new()
+                {
+                    ["apiVersion"] = "maven.operator.io/v1alpha1",
+                    ["kind"]       = "MavenRepository",
+                    ["name"]       = repositoryName,
+                    ["uid"]        = ownerUid,
+                    ["controller"] = false,
+                },
+            };
+        }
         // Build annotations: cert-manager annotation is added first so user-provided
         // RouteAnnotations can override it if needed.
         var annotations = new Dictionary<string, string>();

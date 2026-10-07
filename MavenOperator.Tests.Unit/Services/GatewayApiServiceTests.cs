@@ -160,5 +160,41 @@ public sealed class GatewayApiServiceTests
         var path = matches.Single()["path"].ShouldBeOfType<Dictionary<string, string>>();
         path["value"].ShouldBe("/");
     }
+
+    [Fact]
+    public void BuildHttpRoute_AddsOwnerReference_WhenOwnerUidProvided()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled    = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+        };
+
+        var result = sut.BuildHttpRoute("repo-route", "default", "repo-svc", 80, gatewaySpec, "repo", null, "uid-123");
+
+        var metadata = result["metadata"].ShouldBeOfType<Dictionary<string, object?>>();
+        var owners   = metadata["ownerReferences"].ShouldBeOfType<List<Dictionary<string, object?>>>();
+        var owner    = owners.Single();
+
+        owner["apiVersion"].ShouldBe("maven.operator.io/v1alpha1");
+        owner["kind"].ShouldBe("MavenRepository");
+        owner["name"].ShouldBe("repo");
+        owner["uid"].ShouldBe("uid-123");
+    }
+
+    [Fact]
+    public void BuildHttpRoute_NoOwnerReference_WhenOwnerUidMissing()
+    {
+        var gatewaySpec = new GatewaySpec
+        {
+            Enabled    = true,
+            GatewayRef = new GatewayRefSpec { Name = "public-gw" },
+        };
+
+        var result = sut.BuildHttpRoute("repo-route", "default", "repo-svc", 80, gatewaySpec, "repo");
+
+        var metadata = result["metadata"].ShouldBeOfType<Dictionary<string, object?>>();
+        metadata.ShouldNotContainKey("ownerReferences");
+    }
 }
 

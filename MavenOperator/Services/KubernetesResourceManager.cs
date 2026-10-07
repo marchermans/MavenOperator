@@ -899,7 +899,7 @@ public sealed class KubernetesResourceManager(
         var gatewayApiService = new GatewayApiService();
         var defaultPathPrefix = RepositoryPathHelper.ResolvePathPrefix(owner.Spec, repositoryName);
         var httpRoute = gatewayApiService.BuildHttpRoute(routeName, ns, serviceName, servicePort, gatewaySpec,
-            repositoryName, defaultPathPrefix);
+            repositoryName, defaultPathPrefix, owner.Metadata.Uid);
         var httpRouteJson = System.Text.Json.JsonSerializer.Serialize(httpRoute);
         var patch = new V1Patch(httpRouteJson, V1Patch.PatchType.ApplyPatch);
 
