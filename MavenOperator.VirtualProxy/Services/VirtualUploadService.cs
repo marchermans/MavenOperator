@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Polly;
@@ -94,6 +95,13 @@ public sealed class VirtualUploadResult
 }
 
 /// <summary>
+/// Per-target upload status for reporting to the reconciler.
+/// </summary>
+public sealed record VirtualUploadTargetStatus(
+    string Name,
+    DateTime? LastUploadSuccess);
+
+/// <summary>
 /// Handles upload fan-out for Virtual repositories.
 /// Distributes PUT/DELETE requests to declared member repos in parallel with retry logic.
 /// </summary>
@@ -128,6 +136,12 @@ public interface IVirtualUploadService
     /// Checks if upload fan-out is enabled (has at least one target configured).
     /// </summary>
     bool IsEnabled { get; }
+
+    /// <summary>
+    /// Returns per-target upload status for reporting to the reconciler.
+    /// Includes last successful upload timestamp for each target.
+    /// </summary>
+    IReadOnlyList<VirtualUploadTargetStatus> GetTargetStatus();
 }
 
 /// <inheritdoc/>
@@ -140,6 +154,9 @@ public sealed class VirtualUploadService(
 {
     public bool IsEnabled => config.Targets.Count > 0;
 
+    // Thread-safe tracking of last successful upload per target.
+    private readonly ConcurrentDictionary<string, DateTime> _lastUploadSuccess = new();
+
     /// <inheritdoc/>
     public async Task<VirtualUploadResult> UploadAsync(string artifactPath, Stream content, CancellationToken ct)
     {
@@ -149,26 +166,25 @@ public sealed class VirtualUploadService(
             return new VirtualUploadResult { StatusCode = 502, TargetResults = [] };
         }
 
+        // Buffer the entire request body BEFORE fan-out so each target gets its own copy.
+        byte[]? buffer = null;
+        try
+        {
+            if (content.CanSeek && content.Position > 0)
+                content.Seek(0, SeekOrigin.Begin);
+
+            using var ms = new MemoryStream();
+            await content.CopyToAsync(ms, ct);
+            buffer = ms.ToArray();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "[VirtualUpload] Failed to read upload content for {Path}", artifactPath);
+            return new VirtualUploadResult { StatusCode = 502, TargetResults = [] };
+        }
+
         var results = await ExecuteFanOutAsync(artifactPath, ct, async (target, token) =>
         {
-            // Read content into memory for parallel upload to multiple targets.
-            // For large artifacts, consider streaming with tee or chunked approach in future.
-            byte[]? buffer = null;
-            try
-            {
-                if (!content.CanSeek || content.Position > 0)
-                    content.Seek(0, SeekOrigin.Begin);
-
-                using var ms = new MemoryStream();
-                await content.CopyToAsync(ms, token);
-                buffer = ms.ToArray();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError(ex, "[VirtualUpload] Failed to read upload content for {Path}", artifactPath);
-                return new TargetUploadResult(target.Name, false, null, "Failed to read upload content");
-            }
-
             var url = target.BaseUrl.TrimEnd('/') + "/" + artifactPath.TrimStart('/');
             using var requestContent = new ByteArrayContent(buffer);
             requestContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
@@ -254,13 +270,31 @@ public sealed class VirtualUploadService(
         logger.LogInformation("[VirtualUpload] Fan-out complete for {Path}: {Success}/{Total} succeeded in {Elapsed:F1}s",
             artifactPath, successCount, config.Targets.Count, sw.Elapsed.TotalSeconds);
 
-        // Record metrics.
+        // Record metrics and update last upload success tracking.
+        var now = DateTime.UtcNow;
         foreach (var result in results)
         {
             metrics.RecordUploadRequest(config.Name ?? "unknown", result.TargetName, result.Success, sw.Elapsed.TotalSeconds);
+
+            if (result.Success)
+                _lastUploadSuccess[result.TargetName] = now;
         }
 
         return results.ToList();
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<VirtualUploadTargetStatus> GetTargetStatus()
+    {
+        var status = new List<VirtualUploadTargetStatus>();
+
+        foreach (var target in config.Targets)
+        {
+            var lastSuccess = _lastUploadSuccess.TryGetValue(target.Name, out var ts) ? ts : (DateTime?)null;
+            status.Add(new VirtualUploadTargetStatus(target.Name, lastSuccess));
+        }
+
+        return status.AsReadOnly();
     }
 
     private async Task<TargetUploadResult> SendRequestAsync(
@@ -316,7 +350,7 @@ public sealed class VirtualUploadService(
             sw.Stop();
 
             bool success = statusCode is >= 200 and < 300;
-            logger.LogDebug("[VirtualUpload] Target {Target} returned {Status} in {Elapsed:F1}s",
+            logger.LogInformation("[VirtualUpload] Target {Target} returned {Status} in {Elapsed:F1}s",
                 target.Name, statusCode, sw.Elapsed.TotalSeconds);
 
             return new TargetUploadResult(

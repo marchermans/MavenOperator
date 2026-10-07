@@ -273,6 +273,103 @@ public sealed class VirtualUploadServiceTests : IDisposable
         aggregated.StatusCode.ShouldBe(502);
     }
 
+    // ── Upload success tracking (Phase 5) ─────────────────────────────────────
+
+    [Fact]
+    public void GetTargetStatus_Initially_ReturnsNoLastSuccess()
+    {
+        var config = new VirtualUploadConfig
+        {
+            Name = "test-virtual",
+            Targets =
+            [
+                new UploadTargetConfig("hosted1", "http://hosted1-svc/repository/hosted1/", null),
+                new UploadTargetConfig("hosted2", "http://hosted2-svc/repository/hosted2/", null),
+            ],
+        };
+
+        var svc = BuildService(config);
+        var status = svc.GetTargetStatus();
+
+        status.Count.ShouldBe(2);
+        status.ShouldAllBe(s => s.LastUploadSuccess == null);
+    }
+
+    [Fact]
+    public async Task GetTargetStatus_AfterSuccessfulUpload_ReturnsLastSuccessTimestamp()
+    {
+        var config = new VirtualUploadConfig
+        {
+            Name = "test-virtual",
+            Targets =
+            [
+                new UploadTargetConfig("hosted1", "http://hosted1-svc/repository/hosted1/", null),
+                new UploadTargetConfig("hosted2", "http://hosted2-svc/repository/hosted2/", null),
+            ],
+        };
+
+        _handler.Responses["PUT:http://hosted1-svc/repository/hosted1/com/example/foo/1.0/foo-1.0.jar"] = new HttpResponseMessage(HttpStatusCode.Created);
+        _handler.Responses["PUT:http://hosted2-svc/repository/hosted2/com/example/foo/1.0/foo-1.0.jar"] = new HttpResponseMessage(HttpStatusCode.Created);
+
+        var svc = BuildService(config);
+        using var content = new MemoryStream([1, 2, 3]);
+        await svc.UploadAsync("com/example/foo/1.0/foo-1.0.jar", content, CancellationToken.None);
+
+        var status = svc.GetTargetStatus();
+
+        status.Count.ShouldBe(2);
+        status.ShouldAllBe(s => s.LastUploadSuccess.HasValue);
+    }
+
+    [Fact]
+    public async Task GetTargetStatus_PartialFailure_OnlyUpdatesSuccessfulTargets()
+    {
+        var config = new VirtualUploadConfig
+        {
+            Name = "test-virtual",
+            Targets =
+            [
+                new UploadTargetConfig("hosted1", "http://hosted1-svc/repository/hosted1/", null),
+                new UploadTargetConfig("hosted2", "http://hosted2-svc/repository/hosted2/", null),
+            ],
+        };
+
+        _handler.Responses["PUT:http://hosted1-svc/repository/hosted1/com/example/foo/1.0/foo-1.0.jar"] = new HttpResponseMessage(HttpStatusCode.Created);
+        _handler.Responses["PUT:http://hosted2-svc/repository/hosted2/com/example/foo/1.0/foo-1.0.jar"] = new HttpResponseMessage(HttpStatusCode.Forbidden);
+
+        var svc = BuildService(config);
+        using var content = new MemoryStream([1, 2, 3]);
+        await svc.UploadAsync("com/example/foo/1.0/foo-1.0.jar", content, CancellationToken.None);
+
+        var status = svc.GetTargetStatus();
+
+        // Only hosted1 should have a last success timestamp (hosted2 failed).
+        status.First(s => s.Name == "hosted1").LastUploadSuccess.ShouldNotBeNull();
+        status.First(s => s.Name == "hosted2").LastUploadSuccess.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task GetTargetStatus_AfterDelete_ReturnsLastSuccessTimestamp()
+    {
+        var config = new VirtualUploadConfig
+        {
+            Name = "test-virtual",
+            Targets =
+            [
+                new UploadTargetConfig("hosted1", "http://hosted1-svc/repository/hosted1/", null),
+            ],
+        };
+
+        _handler.Responses["DELETE:http://hosted1-svc/repository/hosted1/com/example/foo/1.0/foo-1.0.jar"] = new HttpResponseMessage(HttpStatusCode.OK);
+
+        var svc = BuildService(config);
+        await svc.DeleteAsync("com/example/foo/1.0/foo-1.0.jar", CancellationToken.None);
+
+        var status = svc.GetTargetStatus();
+
+        status.First(s => s.Name == "hosted1").LastUploadSuccess.ShouldNotBeNull();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private IVirtualUploadService BuildService(VirtualUploadConfig config)

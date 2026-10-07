@@ -102,6 +102,13 @@ app.MapDelete("/{**path}", async (string path, IVirtualProxyMetrics metrics, Can
     return Results.BadRequest($"Delete failed on all targets: {details}");
 });
 
+// GET /api/virtual/upload-status — upload target status for reconciler reporting
+app.MapGet("/api/virtual/upload-status", () =>
+{
+    var targets = uploadService.GetTargetStatus();
+    return Results.Json(new { enabled = uploadService.IsEnabled, targets });
+});
+
 // GET — read artifact (existing behavior unchanged)
 app.MapGet("/{**path}", async (string path, IVirtualProxyService proxy, IVirtualProxyMetrics metrics, CancellationToken ct) =>
 {

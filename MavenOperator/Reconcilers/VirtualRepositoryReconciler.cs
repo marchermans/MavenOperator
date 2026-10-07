@@ -35,7 +35,7 @@ public sealed class VirtualRepositoryReconciler(
     ILogger<VirtualRepositoryReconciler> logger)
     : IVirtualRepositoryReconciler
 {
-    private sealed record MemberRoute(string Name, string BaseUrl);
+    private sealed record MemberRoute(string Name, string BaseUrl, RepositoryType Type);
 
     // Matches MavenOperator.VirtualProxy.Services.UploadTargetConfig — used to build proxy config JSON.
     private sealed record UploadTargetConfig(
@@ -188,15 +188,21 @@ public sealed class VirtualRepositoryReconciler(
                 Targets = [],
             };
 
-            // Probe each target for reachability.
+            // Fetch last upload success timestamps from the proxy.
+            var uploadSuccessByTarget = await FetchUploadTargetStatusAsync(name, ns, ct);
+
+            // Probe each target for reachability and merge with upload success data.
             foreach (var target in resolvedUploadTargets)
             {
                 var reachable = await ProbeTargetReachableAsync(target.BaseUrl, ct);
+                var lastSuccess = uploadSuccessByTarget.GetValueOrDefault(target.Name);
+
                 virtualUploadStatus.Targets.Add(new VirtualUploadTargetStatus
                 {
                     Name = target.Name,
                     Reachable = reachable,
                     LastError = reachable ? null : "Target unreachable (HEAD probe failed)",
+                    LastUploadSuccess = lastSuccess,
                 });
             }
 
@@ -359,21 +365,18 @@ public sealed class VirtualRepositoryReconciler(
         if (uploadEnabled && uploadPolicy == AuthPolicy.Authenticated)
         {
             uploadAuthBlock = $"auth_basic \"Maven Upload - {name}\";\n" +
-                              $"auth_basic_user_file {AuthPath}/upload.htpasswd;";
+                              "auth_basic_user_file /etc/nginx/upload-auth/upload.htpasswd;";
         }
         else
         {
             uploadAuthBlock = "";
         }
 
-        // Build write handling block.
+        // Build write handling block — only auth directives allowed inside limit_except.
         string writeHandlingBlock;
         if (uploadEnabled)
         {
-            var inner = uploadAuthBlock + "\n" +
-                        "client_max_body_size 512m;\n" +
-                        "proxy_read_timeout 300s;\n" +
-                        "proxy_send_timeout 300s;";
+            var inner = uploadAuthBlock.Trim();
             writeHandlingBlock = "# Upload forwarding (PUT/DELETE/MKCOL) — proxied to C# fan-out service.\n" +
                                  "limit_except GET HEAD OPTIONS {\n" +
                                  Indent(inner, 4) + "\n" +
@@ -388,6 +391,8 @@ public sealed class VirtualRepositoryReconciler(
         }
 
         var clientMaxBodySize = uploadEnabled ? "512m" : "1m";
+        // Use longer proxy timeouts when uploads are enabled (fan-out can take time).
+        var proxyReadTimeout = uploadEnabled ? "300s" : "120s";
 
         // Build the full config using double-dollar raw string to escape NGINX braces.
         return $$"""
@@ -414,7 +419,7 @@ public sealed class VirtualRepositoryReconciler(
                     proxy_http_version 1.1;
                     proxy_set_header   Host $host;
                     proxy_set_header   X-Real-IP $remote_addr;
-                    proxy_read_timeout 120s;
+                    proxy_read_timeout {{proxyReadTimeout}};
 
                     client_max_body_size {{clientMaxBodySize}};
                 }
@@ -442,9 +447,13 @@ public sealed class VirtualRepositoryReconciler(
                 ? RepositoryPathHelper.ResolvePathPrefix(configuredPathPrefix: null, memberName)
                 : RepositoryPathHelper.ResolvePathPrefix(memberRepo.Spec, memberName);
 
+            // Default to Hosted if repo doesn't exist (external or legacy member).
+            var memberType = memberRepo?.Spec.Type ?? RepositoryType.Hosted;
+
             resolvedMembers.Add(new MemberRoute(
                 memberName,
-                RepositoryPathHelper.BuildInternalRepositoryUrl($"{memberName}-svc", memberPathPrefix)));
+                RepositoryPathHelper.BuildInternalRepositoryUrl($"{memberName}-svc", memberPathPrefix),
+                memberType));
         }
 
         return resolvedMembers;
@@ -506,6 +515,7 @@ public sealed class VirtualRepositoryReconciler(
     private static V1PodSpec BuildNginxPodSpec(string name, MavenRepositorySpec spec)
     {
         var res = BuildResources(spec);
+        bool uploadEnabled = spec.Virtual?.Upload?.Targets.Count > 0;
 
         return new V1PodSpec
         {
@@ -518,21 +528,7 @@ public sealed class VirtualRepositoryReconciler(
                     ImagePullPolicy = "IfNotPresent",
                     Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
                     Resources       = res,
-                    VolumeMounts    =
-                    [
-                        new V1VolumeMount
-                        {
-                            Name             = "nginx-conf",
-                            MountPath        = ConfPath,
-                            ReadOnlyProperty = true,
-                        },
-                        new V1VolumeMount
-                        {
-                            Name             = "download-auth",
-                            MountPath        = AuthPath,
-                            ReadOnlyProperty = true,
-                        },
-                    ],
+                    VolumeMounts    = BuildNginxVolumeMounts(uploadEnabled),
                     LivenessProbe = new V1Probe
                     {
                         HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
@@ -547,25 +543,25 @@ public sealed class VirtualRepositoryReconciler(
                     },
                 },
             ],
-            Volumes =
-            [
-                new V1Volume
-                {
-                    Name      = "nginx-conf",
-                    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" },
-                },
-                new V1Volume
-                {
-                    Name   = "download-auth",
-                    Secret = new V1SecretVolumeSource
-                    {
-                        SecretName = $"{name}-download-htpasswd",
-                        Optional   = true,
-                    },
-                },
-            ],
+            Volumes = BuildNginxVolumes(name),
         };
     }
+
+    /// <summary>Builds volume mounts for the NGINX container.</summary>
+    private static List<V1VolumeMount> BuildNginxVolumeMounts(bool uploadEnabled) =>
+    [
+        new() { Name = "nginx-conf", MountPath = ConfPath, ReadOnlyProperty = true },
+        new() { Name = "download-auth", MountPath = AuthPath, ReadOnlyProperty = true },
+        ..(uploadEnabled ? new[] { new V1VolumeMount { Name = "upload-auth", MountPath = "/etc/nginx/upload-auth", ReadOnlyProperty = true } } : Array.Empty<V1VolumeMount>())
+    ];
+
+    /// <summary>Builds volumes for the NGINX deployment.</summary>
+    private static List<V1Volume> BuildNginxVolumes(string name) =>
+    [
+        new() { Name = "nginx-conf", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" } },
+        new() { Name = "download-auth", Secret = new V1SecretVolumeSource { SecretName = $"{name}-download-htpasswd", Optional = true } },
+        new() { Name = "upload-auth", Secret = new V1SecretVolumeSource { SecretName = $"{name}-upload-htpasswd", Optional = true } },
+    ];
 
     private static V1ResourceRequirements BuildResources(MavenRepositorySpec spec) =>
         spec.Resources is not null
@@ -606,33 +602,69 @@ public sealed class VirtualRepositoryReconciler(
     {
         var resolved = new List<UploadTargetConfig>();
 
-        // Build a lookup from member name to base URL.
-        var memberLookup = members.ToDictionary(m => m.Name, m => m.BaseUrl);
+        // Build a lookup from member name to route info (URL + type).
+        var memberLookup = members.ToDictionary(m => m.Name, m => m);
+
+        // Validate credentials configuration upfront: every target must have resolvable credentials.
+        foreach (var target in uploadSpec.Targets)
+        {
+            var hasOwnCreds = target.CredentialsRef is not null && !string.IsNullOrWhiteSpace(target.CredentialsRef!.Name);
+            var hasSharedCreds = uploadSpec.SharedCredentialsRef is not null && !string.IsNullOrWhiteSpace(uploadSpec.SharedCredentialsRef.Name);
+
+            if (!hasOwnCreds && !hasSharedCreds)
+                throw new InvalidOperationException(
+                    $"Upload target '{target.Name}' has no credentials configured. " +
+                    $"Either set spec.virtual.upload.targets[].credentialsRef or spec.virtual.upload.sharedCredentialsRef.");
+        }
 
         foreach (var target in uploadSpec.Targets)
         {
-            if (!memberLookup.TryGetValue(target.Name, out var baseUrl))
+            if (!memberLookup.TryGetValue(target.Name, out var memberRoute))
                 throw new InvalidOperationException(
                     $"Upload target '{target.Name}' is not a declared member of this Virtual repository.");
 
+            // Validate target type: only Hosted or Proxy with uploads enabled are allowed.
+            switch (memberRoute.Type)
+            {
+                case RepositoryType.Hosted:
+                    break; // Allowed — stores artifacts directly.
+
+                case RepositoryType.Proxy:
+                    // Proxy targets require upload forwarding to be enabled on the upstream repo.
+                    var proxyRepo = await k8s.GetAsync<MavenRepositoryV1Alpha1>(target.Name, ns, ct);
+                    if (proxyRepo?.Spec.Upstream.Upload.Enabled != true)
+                        throw new InvalidOperationException(
+                            $"Upload target '{target.Name}' is a Proxy repository but does not have upload forwarding enabled. " +
+                            $"Set spec.upstream.upload.enabled: true on the target repository.");
+                    break;
+
+                case RepositoryType.Virtual:
+                    throw new InvalidOperationException(
+                        $"Upload target '{target.Name}' is a Virtual repository, which cannot receive uploads directly. " +
+                        $"Use a Hosted or Proxy member as an upload target instead.");
+
+                default:
+                    throw new InvalidOperationException(
+                        $"Upload target '{target.Name}' has unsupported type '{memberRoute.Type}'.");
+            }
+
+            var baseUrl = memberRoute.BaseUrl;
+
             // Resolve credentials: per-target override first, then shared fallback.
             string? authHeader = null;
-            var credsRef = target.CredentialsRef ?? uploadSpec.SharedCredentialsRef;
+            var credsRef = target.CredentialsRef ?? uploadSpec.SharedCredentialsRef!;
 
-            if (credsRef is not null && !string.IsNullOrWhiteSpace(credsRef.Name))
+            try
             {
-                try
-                {
-                    authHeader = await BuildUpstreamAuthHeaderFromSecretAsync(
-                        credsRef.Name,
-                        string.IsNullOrWhiteSpace(credsRef.Namespace) ? ns : credsRef.Namespace,
-                        ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    throw new InvalidOperationException(
-                        $"Failed to load credentials for upload target '{target.Name}' from Secret '{credsRef.Name}': {ex.Message}", ex);
-                }
+                authHeader = await BuildUpstreamAuthHeaderFromSecretAsync(
+                    credsRef.Name!,
+                    string.IsNullOrWhiteSpace(credsRef.Namespace) ? ns : credsRef.Namespace,
+                    ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to load credentials for upload target '{target.Name}' from Secret '{credsRef.Name}': {ex.Message}", ex);
             }
 
             resolved.Add(new UploadTargetConfig(target.Name, baseUrl, authHeader));
@@ -685,6 +717,66 @@ public sealed class VirtualRepositoryReconciler(
         var credentials = $"{username}:{password}";
         var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
         return $"Basic {encoded}";
+    }
+
+    /// <summary>
+    /// Fetches upload target status from the VirtualProxy's /api/virtual/upload-status endpoint.
+    /// Returns a dictionary mapping target name to last successful upload timestamp.
+    /// </summary>
+    private async Task<Dictionary<string, DateTime>> FetchUploadTargetStatusAsync(
+        string repoName,
+        string ns,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<string, DateTime>();
+
+        try
+        {
+            using var client = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(5),
+            };
+
+            // Call the proxy's upload status endpoint via cluster DNS.
+            var url = $"http://{repoName}-proxy-svc.{ns}.svc.cluster.local:{ProxyPort}/api/virtual/upload-status";
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogDebug("[Virtual] Upload status endpoint returned {Status} for {Repo}", (int)response.StatusCode, repoName);
+                return result; // Return empty — proxy may not be ready yet.
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("targets", out var targets))
+                return result;
+
+            foreach (var target in targets.EnumerateArray())
+            {
+                var name = target.GetProperty("name").GetString();
+                if (string.IsNullOrEmpty(name))
+                    continue;
+
+                if (target.TryGetProperty("lastUploadSuccess", out var lastSuccess) && lastSuccess.ValueKind != JsonValueKind.Null)
+                {
+                    if (DateTime.TryParse(lastSuccess.GetString(), out var ts))
+                        result[name] = ts;
+                }
+            }
+        }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // HttpClient timeout — log and continue, don't fail reconciliation.
+            logger.LogDebug(ex, "[Virtual] Upload status fetch timed out for {Repo}", repoName);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "[Virtual] Failed to fetch upload status from proxy for {Repo}", repoName);
+        }
+
+        return result;
     }
 }
 
