@@ -201,6 +201,84 @@ public sealed class PerformanceBaselineTests
             $"1 000 proxy renders took {sw.ElapsedMilliseconds} ms — expected < 500 ms");
     }
 
+    // ── Phase 4/6: Virtual upload fan-out latency ─────────────────────────────
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task VirtualUploadFanOut_5Targets_MustCompleteWithin_2Seconds()
+    {
+        // Stubbed HTTP — tests parallel fan-out to 5 targets with fast responses.
+        var handler = new FakeFastHandler();
+        var config = new VirtualUploadConfig
+        {
+            Name = "perf-virtual",
+            Targets = Enumerable.Range(1, 5)
+                .Select(i => new UploadTargetConfig($"target{i}", $"http://target{i}/repo/", null))
+                .ToList(),
+            TimeoutSeconds = 30,
+            RetryAttempts = 0, // No retries for performance test.
+        };
+
+        var svc = new VirtualUploadService(
+            config,
+            new HttpClient(handler),
+            NullLogger<VirtualUploadService>.Instance,
+            new TestMetrics());
+
+        using var content = new MemoryStream(new byte[1024]); // 1 KB artifact.
+
+        var sw = Stopwatch.StartNew();
+        for (var iter = 0; iter < 10; iter++)
+        {
+            content.Position = 0;
+            var result = await svc.UploadAsync($"io/test/perf/{iter}/artifact.jar", content, CancellationToken.None);
+            result.StatusCode.ShouldBe(201);
+        }
+        sw.Stop();
+
+        // 10 iterations × 5 targets in parallel with instant responses should be very fast.
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(2),
+            $"10 × 5-target fan-outs took {sw.ElapsedMilliseconds} ms — expected < 2 000 ms");
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task VirtualUploadFanOut_10Targets_MustCompleteWithin_3Seconds()
+    {
+        // Tests fan-out to 10 targets — verifies parallelism scales.
+        var handler = new FakeFastHandler();
+        var config = new VirtualUploadConfig
+        {
+            Name = "perf-virtual",
+            Targets = Enumerable.Range(1, 10)
+                .Select(i => new UploadTargetConfig($"target{i}", $"http://target{i}/repo/", null))
+                .ToList(),
+            TimeoutSeconds = 30,
+            RetryAttempts = 0,
+        };
+
+        var svc = new VirtualUploadService(
+            config,
+            new HttpClient(handler),
+            NullLogger<VirtualUploadService>.Instance,
+            new TestMetrics());
+
+        using var content = new MemoryStream(new byte[1024]);
+
+        var sw = Stopwatch.StartNew();
+        for (var iter = 0; iter < 5; iter++)
+        {
+            content.Position = 0;
+            var result = await svc.UploadAsync($"io/test/perf/{iter}/artifact.jar", content, CancellationToken.None);
+            result.StatusCode.ShouldBe(201);
+        }
+        sw.Stop();
+
+        // 5 iterations × 10 targets in parallel should still be fast.
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(3),
+            $"5 × 10-target fan-outs took {sw.ElapsedMilliseconds} ms — expected < 3 000 ms");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private sealed class FakeCountHandler(Func<int, string> xmlFactory) : HttpMessageHandler
@@ -221,6 +299,27 @@ public sealed class PerformanceBaselineTests
             }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
+    }
+
+    private sealed class FakeFastHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // Instant 201 Created for any PUT — simulates fast upload target.
+            if (request.Method == HttpMethod.Put)
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created));
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+    }
+
+    private sealed class TestMetrics : IVirtualProxyMetrics
+    {
+        public void RecordRequest(string repoName, string artifactPath, string assetType, int statusCode) { }
+        public void RecordMemberRequest(string repoName, string memberName, bool success, double durationSeconds) { }
+        public void RecordMetadataMerge(string repoName, int memberCount, double durationSeconds) { }
+        public void RecordUploadRequest(string repoName, string targetName, bool success, double durationSeconds) { }
     }
 }
 

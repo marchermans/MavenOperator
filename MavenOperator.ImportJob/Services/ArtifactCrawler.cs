@@ -59,10 +59,12 @@ public sealed class ArtifactCrawler
                 {
                     Stream? content = null;
 
-                    // For API sources, open HTTP download stream
-                    if (localArtifact.FilePath is null && openStream is not null)
+                    // PVC-backed artifacts carry FilePath and are read by the sink itself
+                    // (DirectPvcSink copies file-to-file; HttpSink streams from disk).
+                    // API sources need an explicit openStream delegate.
+                    if (localArtifact.FilePath is null)
                     {
-                        content = await openStream(localArtifact, ct);
+                        content = openStream is not null ? await openStream(localArtifact, ct) : null;
                         if (content is null)
                         {
                             _logger.LogWarning("Could not open stream for {Path}", localArtifact.RelativePath);

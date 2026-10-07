@@ -21,6 +21,9 @@ if (args.Contains("--benchmark"))
 
     Console.WriteLine("=== Running NginxConfigBenchmarks ===");
     BenchmarkRunner.Run<NginxConfigBenchmarks>(config);
+
+    Console.WriteLine("=== Running ImportThroughputBenchmark ===");
+    BenchmarkRunner.Run<ImportThroughputBenchmark>(config);
 }
 else
 {

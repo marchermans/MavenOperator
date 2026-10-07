@@ -43,29 +43,47 @@ public sealed class HttpSink : IRepositorySink
             return 0;
         }
 
-        if (content is null)
+        // PVC-backed source — no stream was handed to us; read straight from the
+        // mounted file so HTTP fallback works for snapshot imports.
+        Stream? body = content;
+        Stream? localFile = null;
+        if (body is null && artifact.FilePath is not null)
+            localFile = new FileStream(artifact.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+        try
         {
-            _logger.LogWarning("No content for HTTP PUT of {Path} — skipping", artifact.RelativePath);
-            return 0;
+            if (body is null && localFile is not null)
+                body = localFile;
+
+            if (body is null)
+            {
+                _logger.LogWarning("No content for HTTP PUT of {Path} — skipping", artifact.RelativePath);
+                return 0;
+            }
+
+            var url = $"{_targetUrl}/{artifact.RelativePath}";
+            _logger.LogDebug("PUT {Url}", url);
+
+            var request = new HttpRequestMessage(HttpMethod.Put, url)
+            {
+                Content = new StreamContent(body),
+            };
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+
+            var response = await _http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("PUT {Url} returned {Status}", url, response.StatusCode);
+                return 0;
+            }
+
+            return artifact.SizeBytes ?? 0;
         }
-
-        var url = $"{_targetUrl}/{artifact.RelativePath}";
-        _logger.LogDebug("PUT {Url}", url);
-
-        var request = new HttpRequestMessage(HttpMethod.Put, url)
+        finally
         {
-            Content = new StreamContent(content),
-        };
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-
-        var response = await _http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode)
-        {
-            _logger.LogWarning("PUT {Url} returned {Status}", url, response.StatusCode);
-            return 0;
+            if (localFile is not null)
+                await localFile.DisposeAsync();
         }
-
-        return artifact.SizeBytes ?? 0;
     }
 
     public async Task<bool> ExistsAsync(ArtifactDescriptor artifact, CancellationToken ct)

@@ -37,14 +37,16 @@ public sealed class ProgressReporter
 
     /// <summary>
     /// Updates the Job annotations with current progress counters.
-    /// Throttled — only patches Kubernetes every ReportEveryN artifacts.
+    /// Throttled — only patches Kubernetes every ReportEveryN artifacts, but
+    /// always reports once when processing reaches its end (copied+failed ==
+    /// discovered) so the final counters are persisted before the pod exits.
     /// </summary>
     public async Task ReportAsync(ImportResult progress, CancellationToken ct)
     {
         if (_kubernetes is null) return;
 
-        if (progress.ArtifactsCopied - _lastReportedCopied < ReportEveryN
-            && progress.ArtifactsCopied != progress.ArtifactsDiscovered)
+        var done = progress.ArtifactsCopied + progress.ArtifactsFailed == progress.ArtifactsDiscovered;
+        if (progress.ArtifactsCopied - _lastReportedCopied < ReportEveryN && !done)
             return;
 
         _lastReportedCopied = progress.ArtifactsCopied;
@@ -68,7 +70,9 @@ public sealed class ProgressReporter
             var patchStr  = JsonSerializer.Serialize(patch);
             var patchBody = new V1Patch(patchStr, V1Patch.PatchType.MergePatch);
 
-            await _kubernetes.CoreV1.PatchNamespacedPodAsync(
+            // The counters live on the Job (not a pod) — pods carry a random
+            // suffix and the controller reads annotations off the Job.
+            await _kubernetes.BatchV1.PatchNamespacedJobAsync(
                 patchBody, _jobName, _namespace, cancellationToken: ct);
         }
         catch (Exception ex)

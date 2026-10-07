@@ -199,9 +199,21 @@ public sealed class MavenRepositoryImportController(
 
             if (existingJob is not null)
             {
-                // Sync status from running/completed Job
-                await SyncJobStatusAsync(entity, existingJob, ns, cancellationToken);
+                // Sync status from running/completed Job. Returns the refreshed
+                // entity (its resourceVersion may have advanced if a finalizer was
+                // removed in this pass) — use it for the status write below.
+                entity = await SyncJobStatusAsync(entity, existingJob, ns, cancellationToken);
                 await k8s.UpdateStatusAsync(entity, cancellationToken);
+
+                // Nothing else watches the Job — keep polling on a fixed interval
+                // until the phase reaches a terminal state.
+                if (entity.Status.Phase == ImportPhase.Running)
+                {
+                    var runningResult = ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
+                    runningResult.RequeueAfter = TimeSpan.FromSeconds(20);
+                    return runningResult;
+                }
+
                 return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
             }
 
@@ -258,6 +270,16 @@ public sealed class MavenRepositoryImportController(
             entity.Status.SetCondition("TargetAvailable", true, "TargetReady",
                 $"Target repository '{entity.Spec.TargetRepository}' is Ready");
 
+            // Mode C safety net: install the scale-up recovery finalizer on the
+            // freshest possible copy of the object (before any other write in this
+            // pass), so a crash mid-import can always restore the scaled-down
+            // Reposilite deployment. The returned entity carries the new
+            // resourceVersion — keep using it for all later writes.
+            if (entity.Spec.Source.PvcLive is { } livePref && !string.IsNullOrEmpty(livePref.ReposiliteDeployment))
+            {
+                entity = await EnsureFinalizerAsync(entity, ns, cancellationToken);
+            }
+
             // 2. Validate source PVC constraints (Mode B: snapshot RWO conflict)
             if (entity.Spec.Source.PvcSnapshot is { } snapshot)
             {
@@ -302,8 +324,6 @@ public sealed class MavenRepositoryImportController(
                         type: "Warning", ct: cancellationToken);
                 }
 
-                // Ensure finalizer for scale-up recovery
-                await EnsureFinalizerAsync(entity, ns, cancellationToken);
             }
 
             // 4. Resolve transfer mode
@@ -367,7 +387,11 @@ public sealed class MavenRepositoryImportController(
                 ct: cancellationToken);
 
             await k8s.UpdateStatusAsync(entity, cancellationToken);
-            return ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
+
+            // Poll until the Job completes — no watch exists on Jobs.
+            var createdResult = ReconciliationResult<MavenRepositoryImportV1Alpha1>.Success(entity);
+            createdResult.RequeueAfter = TimeSpan.FromSeconds(20);
+            return createdResult;
         }
         catch (Exception ex)
         {
@@ -416,7 +440,7 @@ public sealed class MavenRepositoryImportController(
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private async Task SyncJobStatusAsync(
+    private async Task<MavenRepositoryImportV1Alpha1> SyncJobStatusAsync(
         MavenRepositoryImportV1Alpha1 entity,
         V1Job job,
         string ns,
@@ -425,19 +449,38 @@ public sealed class MavenRepositoryImportController(
         var succeeded = job.Status?.Succeeded ?? 0;
         var failed    = job.Status?.Failed    ?? 0;
 
+        // Persist final progress counters from the Job annotations before moving
+        // to a terminal phase.
+        var annotations = job.Metadata?.Annotations ?? new Dictionary<string, string>();
+        if (annotations.TryGetValue("maven.operator.io/artifacts-copied", out var copiedStr)
+            && long.TryParse(copiedStr, out var copied))
+            entity.Status.ArtifactsCopied = copied;
+
+        if (annotations.TryGetValue("maven.operator.io/artifacts-discovered", out var discoveredStr)
+            && long.TryParse(discoveredStr, out var discovered))
+            entity.Status.ArtifactsDiscovered = discovered;
+
+        if (annotations.TryGetValue("maven.operator.io/bytes-transferred", out var bytesStr)
+            && long.TryParse(bytesStr, out var bytes))
+            entity.Status.BytesTransferred = bytes;
+
         if (succeeded > 0)
         {
+            // Mode C recovery first: drop the finalizer on a metadata-only update —
+            // UpdateAsync returns the refreshed copy (new resourceVersion, .status
+            // untouched because it is a subresource) so the status mutations below
+            // land on a fresh object and the caller's single UpdateStatusAsync cannot
+            // conflict.
+            if (entity.Spec.Source.PvcLive is { ReposiliteDeployment: { } deployName })
+            {
+                entity = await RemoveFinalizerAsync(entity, ns, ct);
+                await RestoreDeploymentReplicasAsync(entity, deployName, ns, ct);
+            }
+
             entity.Status.Phase          = ImportPhase.Succeeded;
             entity.Status.CompletionTime = job.Status?.CompletionTime ?? DateTime.UtcNow;
             entity.Status.SetCondition("ImportCompleted", true, "JobSucceeded",
                 "Import Job completed successfully");
-
-            // Restore Reposilite replicas (Mode C)
-            if (entity.Spec.Source.PvcLive is { ReposiliteDeployment: { } deployName })
-            {
-                await RestoreDeploymentReplicasAsync(entity, deployName, ns, ct);
-                await RemoveFinalizerAsync(entity, ns, ct);
-            }
 
             await events.PublishAsync(entity, "ImportSucceeded",
                 $"Import completed: {entity.Status.ArtifactsCopied} artifacts copied", ct: ct);
@@ -445,36 +488,27 @@ public sealed class MavenRepositoryImportController(
         else if (failed > 0 && job.Spec?.BackoffLimit.HasValue == true
                              && failed > job.Spec.BackoffLimit)
         {
+            // Same ordering rationale as the success branch above.
+            if (entity.Spec.Source.PvcLive is { ReposiliteDeployment: { } deployName })
+            {
+                entity = await RemoveFinalizerAsync(entity, ns, ct);
+                await RestoreDeploymentReplicasAsync(entity, deployName, ns, ct);
+            }
+
             entity.Status.Phase          = ImportPhase.Failed;
             entity.Status.CompletionTime = DateTime.UtcNow;
             entity.Status.SetCondition("ImportCompleted", false, "JobFailed",
                 $"Import Job exceeded backoff limit ({failed} failures)");
-
-            if (entity.Spec.Source.PvcLive is { ReposiliteDeployment: { } deployName })
-            {
-                await RestoreDeploymentReplicasAsync(entity, deployName, ns, ct);
-                await RemoveFinalizerAsync(entity, ns, ct);
-            }
 
             await events.PublishAsync(entity, "ImportFailed",
                 $"Import Job failed after {failed} attempts", type: "Warning", ct: ct);
         }
         else
         {
-            // Still running — read progress annotations if present
-            var annotations = job.Metadata?.Annotations ?? new Dictionary<string, string>();
-            if (annotations.TryGetValue("maven.operator.io/artifacts-copied", out var copiedStr)
-                && long.TryParse(copiedStr, out var copied))
-                entity.Status.ArtifactsCopied = copied;
-
-            if (annotations.TryGetValue("maven.operator.io/artifacts-discovered", out var discoveredStr)
-                && long.TryParse(discoveredStr, out var discovered))
-                entity.Status.ArtifactsDiscovered = discovered;
-
-            if (annotations.TryGetValue("maven.operator.io/bytes-transferred", out var bytesStr)
-                && long.TryParse(bytesStr, out var bytes))
-                entity.Status.BytesTransferred = bytes;
+            // Still running — counters were already read above.
         }
+
+        return entity;
     }
 
     private async Task ScaleDownDeploymentAsync(
@@ -545,29 +579,29 @@ public sealed class MavenRepositoryImportController(
             $"Restored '{deployName}' to {originalReplicas} replicas after import", ct: ct);
     }
 
-    private async Task EnsureFinalizerAsync(
+    private async Task<MavenRepositoryImportV1Alpha1> EnsureFinalizerAsync(
         MavenRepositoryImportV1Alpha1 entity,
         string ns,
         CancellationToken ct)
     {
         entity.Metadata.Finalizers ??= [];
         if (entity.Metadata.Finalizers.Contains(ImportCleanupFinalizer))
-            return;
+            return entity;
 
         entity.Metadata.Finalizers.Add(ImportCleanupFinalizer);
-        await k8s.UpdateAsync(entity, ct);
+        return await k8s.UpdateAsync(entity, ct);
     }
 
-    private async Task RemoveFinalizerAsync(
+    private async Task<MavenRepositoryImportV1Alpha1> RemoveFinalizerAsync(
         MavenRepositoryImportV1Alpha1 entity,
         string ns,
         CancellationToken ct)
     {
         if (entity.Metadata.Finalizers?.Contains(ImportCleanupFinalizer) != true)
-            return;
+            return entity;
 
         entity.Metadata.Finalizers.Remove(ImportCleanupFinalizer);
-        await k8s.UpdateAsync(entity, ct);
+        return await k8s.UpdateAsync(entity, ct);
     }
 
     /// <summary>
