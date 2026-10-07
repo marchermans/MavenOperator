@@ -1,9 +1,10 @@
 #!/bin/sh
-# Minimal Gradle wrapper — downloads Gradle 8.13 on first use if gradle is not on PATH.
+# Minimal Gradle wrapper — downloads Gradle on first use if gradle is not on PATH.
+# 9.x required to run on JDK 25 (Gradle ≤ 8.14 tops out at Java 23/24).
 
 set -e
 
-GRADLE_VERSION="8.13"
+GRADLE_VERSION="9.8.0"
 WRAPPER_BASE="${HOME}/.gradle/wrapper/dists"
 GRADLE_HOME="${WRAPPER_BASE}/gradle-${GRADLE_VERSION}-bin/gradle-${GRADLE_VERSION}"
 GRADLE_BIN="${GRADLE_HOME}/bin/gradle"
