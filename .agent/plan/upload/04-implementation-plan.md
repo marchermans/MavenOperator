@@ -10,16 +10,16 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Define `ProxyUploadMode` enum in `Entities/Enums/`.
-- [ ] Create `LocalObjectReference`, `ProxyUploadSpec` in `Entities/Spec/ProxySpec.cs`.
-- [ ] Create `VirtualUploadTarget`, `VirtualUploadSpec` in `Entities/Spec/VirtualSpec.cs`.
-- [ ] Add `Upload` property to `ProxySpec` and `VirtualSpec`.
-- [ ] Create upload status types (`ProxyUploadStatus`, `VirtualUploadStatus`, etc.) in `Entities/Status/`.
-- [ ] Add `Upload` property to `MavenRepositoryStatus`.
-- [ ] Update CRD YAML files:
+- [x] Define `ProxyUploadMode` enum in `Entities/Enums/`.
+- [x] Create `LocalObjectReference`, `ProxyUploadSpec` in `Entities/Spec/ProxySpec.cs`.
+- [x] Create `VirtualUploadTarget`, `VirtualUploadSpec` in `Entities/Spec/VirtualSpec.cs`.
+- [x] Add `Upload` property to `ProxySpec` and `VirtualSpec`.
+- [x] Create upload status types (`ProxyUploadStatus`, `VirtualUploadStatus`, etc.) in `Entities/Status/`.
+- [x] Add `Upload` property to `MavenRepositoryStatus`.
+- [x] Update CRD YAML files:
   - `config/crds/mavenrepositories.maven.operator.io.yaml`
   - `charts/maven-operator/crds/mavenrepositories.maven.operator.io.yaml` (must be identical copy)
-- [ ] Run `./scripts/run-tests.sh all --fast` to verify no regressions.
+- [x] Run `./scripts/run-tests.sh all --fast` to verify no regressions.
 
 ### Acceptance Criteria
 
@@ -36,19 +36,19 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Update `ProxyRepositoryReconciler`:
+- [x] Update `ProxyRepositoryReconciler`:
   - Read `spec.proxy.upload` configuration.
   - Watch and load upstream credentials Secret when enabled.
   - Set status fields (`upload.proxy.*`).
-- [ ] Add external exposure detection:
+- [x] Add external exposure detection:
   - Check Service type (LoadBalancer/NodePort).
   - Query for Ingress/Gateway resources routing to this proxy's Service.
   - Block uploads if exposed and `forceAllowOnExternal == false`.
-- [ ] Update NGINX template (`Templates/nginx-proxy.conf.scriban`):
+- [x] Update NGINX template (`Templates/nginx-proxy.conf.scriban`):
   - Add upload forwarding block for PUT/DELETE/MKCOL.
   - Inject upstream credentials as base64-encoded Basic auth header.
   - Support Passthrough mode (enforce client auth via existing upload policy).
-- [ ] Emit Events:
+- [x] Emit Events:
   - Normal: `UploadEnabled`, `UploadBlockedExternallyExposed`.
   - Warning: `UpstreamCredentialsMissing`, `UploadForwardingFailed`.
 
@@ -68,16 +68,16 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Implement `Override` mode in NGINX template:
+- [x] Implement `Override` mode in NGINX template:
   - Skip client auth for write methods when `mode == Override`.
   - Still forward with upstream credentials.
-- [ ] Improve error responses:
+- [x] Improve error responses:
   - Map upstream 401/403 to 502 with helpful message ("Upstream rejected upload").
   - Never leak upstream credentials in error messages.
-- [ ] Add CEL validation (if webhook supports it):
+- [x] Add CEL validation (if webhook supports it):
   - `upstreamCredentialsRef` required when `enabled == true`.
   - `mode` must be valid enum value.
-- [ ] Update admission webhook:
+- [x] Update admission webhook:
   - Validate external exposure rules at apply time.
   - Reject invalid configurations early with clear messages.
 
@@ -96,19 +96,19 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Create `VirtualUploadService` in `MavenOperator.VirtualProxy/Services/`:
+- [x] Create `VirtualUploadService` in `MavenOperator.VirtualProxy/Services/`:
   - Reads current CRD spec (via injected config or K8s client).
   - Resolves target member URLs from cluster DNS (`<name>.<namespace>.svc.cluster.local`).
   - Loads credentials (shared or per-target) from Secrets.
   - Sends parallel PUT requests with Polly retry policy.
   - Aggregates responses into a single result (201/207/502).
-- [ ] Update `VirtualProxyService`:
+- [x] Update `VirtualProxyService`:
   - Route PUT/DELETE/MKCOL to `VirtualUploadService` instead of returning 405.
   - Enforce client auth using existing upload policy before fan-out.
-- [ ] Update NGINX template (`Templates/nginx-virtual.conf.scriban`):
+- [x] Update NGINX template (`Templates/nginx-virtual.conf.scriban`):
   - Allow write methods through when `upload.enabled == true`.
   - Keep 405 for Virtual repos without upload targets configured.
-- [ ] Add target reachability probing in `VirtualRepositoryReconciler`:
+- [x] Add target reachability probing in `VirtualRepositoryReconciler`:
   - Periodic HEAD request to each upload target.
   - Update `status.upload.virtual.targets[].reachable`.
 
@@ -128,12 +128,12 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Implement per-target credential overrides (`VirtualUploadTarget.CredentialsRef`).
-- [ ] Implement shared credentials fallback (`VirtualUploadSpec.SharedCredentialsRef`).
-- [ ] Add validation in webhook:
+- [x] Implement per-target credential overrides (`VirtualUploadTarget.CredentialsRef`).
+- [x] Implement shared credentials fallback (`VirtualUploadSpec.SharedCredentialsRef`).
+- [x] Add validation in webhook:
   - Every target must have resolvable credentials (own ref or shared).
   - Targets must be declared members with type Hosted.
-- [ ] Update status reporting:
+- [x] Update status reporting:
   - Track `lastUploadSuccess` per target (updated by VirtualProxy via a sidecar API or metrics endpoint).
   - Surface `lastError` when probing fails.
 
@@ -151,13 +151,13 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
 
 ### Tasks
 
-- [ ] Add structured logging for all upload operations (see 02-virtual-upload.md log format).
-- [ ] Expose metrics:
+- [x] Add structured logging for all upload operations (see 02-virtual-upload.md log format).
+- [x] Expose metrics:
   - `maven_upload_requests_total{repository, target, status}`
   - `maven_upload_duration_seconds{repository, target}`
   - `maven_upload_target_reachable{repository, target}`
-- [ ] Add Grafana dashboard panels for upload activity (extend existing dashboards).
-- [ ] Write E2E tests:
+- [x] Add Grafana dashboard panels for upload activity (extend existing dashboards).
+- [x] Write E2E tests:
   - Proxy upload forwarding with Passthrough and Override modes.
   - Virtual upload fan-out to multiple Hosted targets.
   - Partial failure scenarios (one target down, others succeed).

@@ -139,13 +139,13 @@ whether the route is exposed via Ingress or Gateway.
 
 ## Delivery checklist
 
-- [ ] `GatewaySpec.cs` entity class (C#)
-- [ ] `spec.gateway` section added to CRD YAML + Helm chart CRDs
-- [ ] CEL rules for mutual exclusion + required `gatewayRef.name`
-- [ ] `GatewayRouteReconciler` service / reconciler step
-- [ ] RBAC for `httproutes` in Helm `ClusterRole` template
-- [ ] Update `01-crd-design.md` child-resource table (add `-route` row)
-- [ ] Unit tests: `GatewayRouteReconciler` — enabled/disabled, Hosted/Virtual, missing gatewayRef
-- [ ] Integration tests: apply CRD + operator → assert HTTPRoute created/deleted on toggle
-- [ ] E2E tests: Maven client resolves through Gateway API HTTPRoute
+- [x] `GatewaySpec.cs` entity class (C#)
+- [x] `spec.gateway` section added to CRD YAML + Helm chart CRDs
+- [x] CEL rules for mutual exclusion + required `gatewayRef.name`
+- [x] `GatewayRouteReconciler` service / reconciler step
+- [x] RBAC for `httproutes` in Helm `ClusterRole` template
+- [x] Update `01-crd-design.md` child-resource table (add `-route` row)
+- [x] Unit tests: `GatewayRouteReconciler` — enabled/disabled, Hosted/Virtual, missing gatewayRef
+- [x] Integration tests: apply CRD + operator → assert HTTPRoute created/deleted on toggle
+- [x] E2E tests: Maven client resolves through Gateway API HTTPRoute
 

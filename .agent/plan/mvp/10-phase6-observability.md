@@ -606,43 +606,43 @@ evaluation). NGINX `location` blocks are rendered ordered by longest-prefix-firs
 ## Deliverables checklist
 
 ### Observability
-- [ ] Switch NGINX config templates to emit structured JSON access logs
-- [ ] Add `nginx/nginx-prometheus-exporter` sidecar injection to all NGINX pod templates
-- [ ] Add `mtail` sidecar injection with an mtail program for Maven access log parsing
-- [ ] Operator creates `PodMonitor` resources when `metrics.podMonitor.enabled: true`
-- [ ] Add `spec.metrics.*` fields to CRD schema with CEL validation
-- [ ] Unit tests: `NginxConfigRenderer` log_format output
-- [ ] Unit tests: mtail program parsing (input log → expected metrics)
-- [ ] Integration tests: scrape both sidecar metric endpoints after operator creates a repo
-- [ ] E2E tests: deploy a repo, perform GET/PUT, verify metrics increment correctly
-- [ ] Grafana dashboards as Helm ConfigMaps (4 dashboards — see `12-dashboards-alerts.md`)
-- [ ] PrometheusRule alert rules as Helm resource (9 alerts — see `12-dashboards-alerts.md`)
-- [ ] Helm values for sidecar images, resources, podMonitor, grafana toggle
-- [ ] README: metrics section updated
+- [x] Switch NGINX config templates to emit structured JSON access logs
+- [x] Add `nginx/nginx-prometheus-exporter` sidecar injection to all NGINX pod templates
+- [x] Add `mtail` sidecar injection with an mtail program for Maven access log parsing
+- [x] Operator creates `PodMonitor` resources when `metrics.podMonitor.enabled: true`
+- [x] Add `spec.metrics.*` fields to CRD schema with CEL validation
+- [x] Unit tests: `NginxConfigRenderer` log_format output
+- [x] Unit tests: mtail program parsing (input log → expected metrics)
+- [x] Integration tests: scrape both sidecar metric endpoints after operator creates a repo
+- [x] E2E tests: deploy a repo, perform GET/PUT, verify metrics increment correctly
+- [x] Grafana dashboards as Helm ConfigMaps (4 dashboards — see `12-dashboards-alerts.md`)
+- [x] PrometheusRule alert rules as Helm resource (9 alerts — see `12-dashboards-alerts.md`)
+- [x] Helm values for sidecar images, resources, podMonitor, grafana toggle
+- [x] README: metrics section updated
 
 ### Authentication
-- [ ] Extend CRD schema with `auth.users[].role` (backward-compatible with legacy `secretRefs`)
-- [ ] Extend CRD schema with `auth.ciTrust[]` (platform, issuerUrl, audience, role, claims)
-- [ ] CEL validation: `ciTrust[].claims` must be non-empty; `platform` and `role` must be valid enums
-- [ ] `RoleBasedHtpasswdService`: filter users by role when building download/upload htpasswd files
-- [ ] New project `MavenOperator.AuthProxy` — ASP.NET Core sidecar handling both Basic Auth and Bearer JWT
-- [ ] `IJwksCache` service: fetch and cache JWKS per issuer URL; force-refresh on unknown `kid`
-- [ ] `ITrustEvaluator` service: evaluate `ciTrust` bindings against JWT claims (glob matching, ordered, first-match)
-- [ ] `IAuthProxyConfig` / `IOptionsMonitor<T>`: hot-reload from ConfigMap without sidecar restart
-- [ ] Operator renders `maven-auth-proxy` ConfigMap from `ciTrust` spec and injects sidecar into NGINX pods
-- [ ] NGINX `auth_request` template block rendered by `NginxConfigRenderer` (replacing direct `auth_basic` when `ciTrust` is non-empty)
-- [ ] ACL location block rendering (ordered by specificity)
-- [ ] Unit tests: `TrustEvaluator` — glob matching, first-match, audience enforcement, empty-claims rejection
-- [ ] Unit tests: `JwksCache` — cache hit, cache miss, force-refresh on unknown kid, HTTPS-only issuer
-- [ ] Unit tests: role filtering in `RoleBasedHtpasswdService`
-- [ ] Unit tests: ACL `location` block ordering
-- [ ] Integration tests: validate GitHub Actions JWT (use a pre-signed test JWT from the GH OIDC JWKS) → 200 deployer
-- [ ] Integration tests: validate GitLab JWT (use a pre-signed test JWT) → correct role
-- [ ] Integration tests: mismatched claim → 403
-- [ ] Integration tests: expired JWT → 401
-- [ ] Integration tests: unknown issuer → 403
-- [ ] E2E tests: synthetic GitHub-format JWT → `mvn deploy` succeeds; wrong repo claim → 403
-- [ ] Backward-compatibility: existing `auth.download.secretRefs` still works unmodified
+- [x] Extend CRD schema with `auth.users[].role` (backward-compatible with legacy `secretRefs`)
+- [x] Extend CRD schema with `auth.ciTrust[]` (platform, issuerUrl, audience, role, claims)
+- [x] CEL validation: `ciTrust[].claims` must be non-empty; `platform` and `role` must be valid enums
+- [x] `RoleBasedHtpasswdService`: filter users by role when building download/upload htpasswd files
+- [x] New project `MavenOperator.AuthProxy` — ASP.NET Core sidecar handling both Basic Auth and Bearer JWT
+- [x] `IJwksCache` service: fetch and cache JWKS per issuer URL; force-refresh on unknown `kid`
+- [x] `ITrustEvaluator` service: evaluate `ciTrust` bindings against JWT claims (glob matching, ordered, first-match)
+- [x] `IAuthProxyConfig` / `IOptionsMonitor<T>`: hot-reload from ConfigMap without sidecar restart
+- [x] Operator renders `maven-auth-proxy` ConfigMap from `ciTrust` spec and injects sidecar into NGINX pods
+- [x] NGINX `auth_request` template block rendered by `NginxConfigRenderer` (replacing direct `auth_basic` when `ciTrust` is non-empty)
+- [x] ACL location block rendering (ordered by specificity)
+- [x] Unit tests: `TrustEvaluator` — glob matching, first-match, audience enforcement, empty-claims rejection
+- [x] Unit tests: `JwksCache` — cache hit, cache miss, force-refresh on unknown kid, HTTPS-only issuer
+- [x] Unit tests: role filtering in `RoleBasedHtpasswdService`
+- [x] Unit tests: ACL `location` block ordering
+- [x] Integration tests: validate GitHub Actions JWT (use a pre-signed test JWT from the GH OIDC JWKS) → 200 deployer
+- [x] Integration tests: validate GitLab JWT (use a pre-signed test JWT) → correct role
+- [x] Integration tests: mismatched claim → 403
+- [x] Integration tests: expired JWT → 401
+- [x] Integration tests: unknown issuer → 403
+- [x] E2E tests: synthetic GitHub-format JWT → `mvn deploy` succeeds; wrong repo claim → 403
+- [x] Backward-compatibility: existing `auth.download.secretRefs` still works unmodified
 
 ---
 
