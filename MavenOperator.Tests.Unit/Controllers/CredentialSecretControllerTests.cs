@@ -138,6 +138,24 @@ public sealed class CredentialSecretControllerTests
     }
 
     [Fact]
+    public async Task ReconcileAsync_PersistsRepoStatus_AfterSuccessfulRereconcile()
+    {
+        // This controller bypasses MavenRepositoryController's queue item, which is
+        // the only other place repo status gets persisted — without an explicit
+        // UpdateStatusAsync here the reconciler's in-memory status changes are lost.
+        const string secretName = "creds";
+        const string ns = "ns";
+        var repo = BuildHostedRepo("repo", ns, downloadSecretRefs: [secretName]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns([repo]);
+
+        var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
+        await _sut.ReconcileAsync(secret, CancellationToken.None);
+
+        await _k8s.Received(1).UpdateStatusAsync(repo, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task ReconcileAsync_SwallowsException_FromSubReconcile_AndContinues()
     {
         const string secretName = "creds";
@@ -159,6 +177,9 @@ public sealed class CredentialSecretControllerTests
         result.IsSuccess.ShouldBeTrue();
         // Second repo should still be attempted
         await _hosted.Received(1).ReconcileAsync(repo2, Arg.Any<CancellationToken>());
+        // Status persisted only for the successful rereconcile
+        await _k8s.DidNotReceive().UpdateStatusAsync(repo1, Arg.Any<CancellationToken>());
+        await _k8s.Received(1).UpdateStatusAsync(repo2, Arg.Any<CancellationToken>());
     }
 
     [Fact]

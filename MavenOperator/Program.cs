@@ -1,3 +1,4 @@
+using KubeOps.Abstractions.Builder;
 using KubeOps.Operator;
 using MavenOperator.Controllers;
 using MavenOperator.Entities;
@@ -14,8 +15,12 @@ builder.Logging.AddConsole();
 
 
 // ── KubeOps operator ─────────────────────────────────────────────────────────
+// ByResourceVersion (not the default ByGeneration): annotation-only updates must
+// still trigger reconciliation — e.g. toggling maven.operator.io/externally-exposed
+// on a live proxy repo does not bump metadata.generation and would otherwise be
+// silently ignored by KubeOps' watch handler.
 builder.Services
-    .AddKubernetesOperator()
+    .AddKubernetesOperator(o => o.WithReconcileStrategy(ReconcileStrategy.ByResourceVersion))
     .AddController<MavenRepositoryController, MavenRepositoryV1Alpha1>()
     .AddController<CredentialSecretController, V1Secret>()
     .AddController<MavenRepositoryImportController, MavenRepositoryImportV1Alpha1>();

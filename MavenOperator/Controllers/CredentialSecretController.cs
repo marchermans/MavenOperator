@@ -82,6 +82,11 @@ public sealed class CredentialSecretController(
                     _                      => Task.CompletedTask,
                 });
 
+                // The reconcilers mutate repo.Status in memory but only the CR's own
+                // controller (MavenRepositoryController) persists it via UpdateStatusAsync;
+                // this path bypasses that queue item, so persist explicitly.
+                await k8s.UpdateStatusAsync(repo, cancellationToken);
+
                 await events.PublishAsync(repo, "AuthUpdated",
                     $"Credential Secret '{secretName}' changed — htpasswd rebuilt",
                     ct: cancellationToken);
