@@ -162,7 +162,7 @@ Phased rollout of upload support for Proxy and Virtual repositories. Each phase 
   - Virtual upload fan-out to multiple Hosted targets.
   - Partial failure scenarios (one target down, others succeed).
   - External exposure blocking on Proxy.
-- [ ] Performance test: measure latency of Virtual uploads with N targets.
+- ~~Performance test: measure latency of Virtual uploads with N targets.~~ (struck 2026-10-08 — not needed)
 
 ### Acceptance Criteria
 
