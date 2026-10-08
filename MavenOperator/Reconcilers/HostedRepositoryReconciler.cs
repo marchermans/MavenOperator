@@ -32,9 +32,12 @@ public sealed class HostedRepositoryReconciler(
 {
     private static string AuthProxyImage =>
         Environment.GetEnvironmentVariable("AUTH_PROXY_IMAGE") ?? "maven-auth-proxy:dev";
+    private static string MetadataBrokerImage =>
+        Environment.GetEnvironmentVariable("METADATA_BROKER_IMAGE") ?? "maven-metadata-broker:dev";
     private const string NginxImage     = "nginx:1.27-alpine";
     private const string AuthProxyMountPath = "/etc/maven-auth";
     private const int AuthProxyPort = 8080;
+    private const int MetadataBrokerPort = 8091;
     private const string RepositoryPath = "/var/maven/repository";
     private const string AuthPath       = "/etc/nginx/auth";
     private const string ConfPath       = "/etc/nginx/conf.d";
@@ -415,6 +418,31 @@ public sealed class HostedRepositoryReconciler(
                 },
             });
         }
+
+        // ── Metadata broker sidecar (always present) ─────────────────────
+        // Generates listing/snapshot maven-metadata.xml from on-disk state and turns
+        // metadata PUT/DELETE into ack-only invalidations. Pod-internal only: nginx is
+        // the sole caller via loopback, so no Service port is exposed.
+        containers.Add(new V1Container
+        {
+            Name = "metadata-broker",
+            Image = MetadataBrokerImage,
+            ImagePullPolicy = "IfNotPresent",
+            Ports = [new V1ContainerPort { ContainerPort = MetadataBrokerPort, Name = "metadata-broker" }],
+            Env = new List<V1EnvVar>
+            {
+                new() { Name = "REPOSITORY_ROOT", Value = RepositoryPath },
+                new() { Name = "ASPNETCORE_URLS", Value = $"http://127.0.0.1:{MetadataBrokerPort}" },
+            },
+            VolumeMounts = [new V1VolumeMount { Name = "repository", MountPath = RepositoryPath }],
+            LivenessProbe  = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = MetadataBrokerPort }, InitialDelaySeconds = 5, PeriodSeconds = 15 },
+            ReadinessProbe = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = MetadataBrokerPort }, InitialDelaySeconds = 3, PeriodSeconds = 10 },
+            Resources = new V1ResourceRequirements
+            {
+                Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },
+                Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("10m"),  ["memory"] = new("32Mi")  },
+            },
+        });
 
         return new V1PodSpec { Containers = containers, Volumes = volumes };
     }

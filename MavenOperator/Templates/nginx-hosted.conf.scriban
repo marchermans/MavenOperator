@@ -47,6 +47,15 @@ map $uri $maven_cache_control_{{ var_name }} {
     default                    "public, max-age=31536000, immutable";
 }
 
+# ── Metadata broker routing (http context) ─────────────────────────────
+# Repository-relative URI handed to the in-pod metadata sidecar: strip this
+# repository's path prefix, keep the leading slash. The broker receives e.g.
+# /com/acme/lib/maven-metadata.xml and classifies it from there.
+map $uri $meta_rel_{{ var_name }} {
+    ~^{{ path_prefix_regex }}/?(.*)   /\1;
+    default                          $uri;
+}
+
 # ── JSON access log format ──────────────────────────────────────────────────
 log_format maven_json_{{ var_name }} escape=json
     '{'
@@ -122,6 +131,63 @@ server {
         proxy_set_header X-Original-Method $request_method;
     }
     {{ end -}}
+
+    # ── maven-metadata.xml → metadata broker sidecar (loopback :8091) ─────
+    # Listing/snapshot metadata is generated from on-disk state by the in-pod
+    # sidecar; PUT/DELETE are ack-only invalidations, so concurrent builds can
+    # no longer overwrite each other's freshly written maven-metadata.xml.
+    # (Regex locations take precedence over the dav prefix location below.)
+    location ~^{{ path_prefix_regex }}(.*)maven-metadata\.xml$ {
+        proxy_cache off;
+
+        # Metadata bodies are tiny — cap uploads well below artifact sizes.
+        client_max_body_size 1m;
+
+        {{ if metrics_enabled -}}
+        access_log /var/log/nginx/access.json maven_json_{{ var_name }};
+        {{ end -}}
+
+        # WebDAV clients preflight with OPTIONS; answer locally like the dav location does.
+        if ($request_method = 'OPTIONS') {
+            add_header Allow "GET, HEAD, PUT, POST, DELETE";
+            return 204;
+        }
+
+        # Authentication — mirrors the dav location below.
+        {{ if download_auth_proxy_enabled || upload_auth_proxy_enabled -}}
+        auth_request /auth/validate;
+        auth_request_set $maven_auth_role $upstream_http_x_auth_role;
+        {{ else if download_policy == "Authenticated" -}}
+        auth_basic "Maven - {{ name }}";
+        auth_basic_user_file /etc/nginx/auth/download.htpasswd;
+        {{ end -}}
+
+        limit_except GET HEAD OPTIONS {
+            {{ if download_auth_proxy_enabled || upload_auth_proxy_enabled -}}
+            # Enforced by the outer auth_request using X-Original-Method.
+            {{ else if upload_policy == "Authenticated" -}}
+            auth_basic "Maven Upload - {{ name }}";
+            auth_basic_user_file /etc/nginx/upload-auth/upload.htpasswd;
+            {{ else -}}
+            # Upload policy is Anonymous — allow all inside limit_except so writes are
+            # unrestricted while downloads follow the outer download policy.
+            allow all;
+            {{ end -}}
+        }
+
+        # $meta_rel_<name> already carries the leading slash; nginx appends $args automatically.
+        proxy_pass http://127.0.0.1:8091$meta_rel_{{ var_name }};
+
+        # Broker unavailable (sidecar crash/restart) → short retry instead of an opaque 5xx.
+        error_page 502 504 @meta_broker_down_{{ var_name }};
+    }
+
+    # Fallback when the metadata broker cannot be reached: ask dav clients to retry shortly.
+    location @meta_broker_down_{{ var_name }} {
+        internal;
+        add_header Retry-After 5 always;
+        return 409 "maven-metadata.xml is being updated, please retry";
+    }
 
     location {{ location_path_prefix }} {
         alias /var/maven/repository/;

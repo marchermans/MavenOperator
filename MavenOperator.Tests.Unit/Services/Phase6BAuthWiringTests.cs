@@ -67,9 +67,10 @@ public sealed class Phase6BAuthWiringTests
         var validateCount = result.Split("location = /auth/validate").Length - 1;
         validateCount.ShouldBe(1, "Should only define /auth/validate once");
         
-        // The repository location should use a single location-scoped auth_request.
+        // Both protected locations (dav + maven-metadata.xml broker routing) share the
+        // single /auth/validate endpoint via their own location-scoped auth_request.
         var authRequestCount = result.Split("auth_request /auth/validate").Length - 1;
-        authRequestCount.ShouldBe(1);
+        authRequestCount.ShouldBe(2);
     }
 
     [Fact]
