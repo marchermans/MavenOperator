@@ -47,6 +47,8 @@ spec:
               value: {{ include "maven-operator.authProxyImage" . | quote }}
             - name: VIRTUAL_PROXY_IMAGE
               value: {{ include "maven-operator.virtualProxyImage" . | quote }}
+            - name: METADATA_BROKER_IMAGE
+              value: {{ include "maven-operator.metadataBrokerImage" . | quote }}
             - name: IMPORT_JOB_IMAGE
               value: {{ include "maven-operator.importJobImage" . | quote }}
             - name: IMPORT_JOB_CLUSTER_ROLE_NAME

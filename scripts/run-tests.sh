@@ -327,6 +327,7 @@ run_e2e() {
     cluster_load_operator_image
     cluster_load_virtual_proxy_image
     cluster_load_import_job_image
+    cluster_load_metadata_broker_image
     cluster_deploy_operator
   else
     log_info "Using external KUBECONFIG: ${KUBECONFIG}"
@@ -438,6 +439,7 @@ run_performance() {
       cluster_apply_rbac
       cluster_load_operator_image
       cluster_load_virtual_proxy_image
+      cluster_load_metadata_broker_image
       cluster_deploy_operator
     else
       log_info "Using external KUBECONFIG: ${KUBECONFIG}"

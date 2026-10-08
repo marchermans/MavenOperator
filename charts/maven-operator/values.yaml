@@ -27,6 +27,14 @@ authProxy:
     # -- Overrides the image tag; defaults to Chart.appVersion
     tag: ""
 
+metadataBroker:
+  image:
+    # -- Metadata-broker sidecar image repository (without tag)
+    repository: ghcr.io/marchermans/maven-metadata-broker
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag; defaults to Chart.appVersion
+    tag: ""
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

@@ -383,6 +383,48 @@ cluster_load_virtual_proxy_image() {
   log_info "Virtual-proxy in-cluster image ref: ${VIRTUAL_PROXY_IMAGE_IN_CLUSTER}"
 }
 
+# Build the metadata-broker container image and import it into k3d.
+# Sets METADATA_BROKER_IMAGE_IN_CLUSTER similar to VIRTUAL_PROXY_IMAGE_IN_CLUSTER.
+cluster_load_metadata_broker_image() {
+  local image_tag="${METADATA_BROKER_IMAGE:-maven-metadata-broker:dev}"
+  log_section "Building & loading metadata-broker image"
+  log_step "Building image '${image_tag}' with ${CONTAINER_RUNTIME}..."
+  "${CONTAINER_RUNTIME}" build \
+    --no-cache \
+    -f "${REPO_ROOT}/MavenOperator.MetadataBroker/Dockerfile" \
+    -t "${image_tag}" \
+    "${REPO_ROOT}"
+  log_ok "Metadata-broker image built."
+
+  log_step "Loading metadata-broker into all k3d nodes directly via containerd..."
+  local _tmp_tar_mb
+  _tmp_tar_mb="$(mktemp --suffix=.tar)"
+  _container_save "${image_tag}" "${_tmp_tar_mb}"
+
+  local _all_nodes_mb
+  # k3d node list does not support --cluster; filter by cluster column in awk
+  _all_nodes_mb=$(k3d node list --no-headers 2>/dev/null | awk -v cluster="${K3D_CLUSTER_NAME}" '$3 == cluster && !/tools/ {print $1}')
+  local _canonical_mb="docker.io/library/${image_tag}"
+  # k3d nodes are always Docker containers — always use docker for node operations,
+  # regardless of which runtime (podman/docker) was used to build the image.
+  for _node in ${_all_nodes_mb}; do
+    docker exec "${_node}" ctr images remove "localhost/${image_tag}" 2>/dev/null || true
+    docker exec "${_node}" ctr images remove "${_canonical_mb}" 2>/dev/null || true
+    docker cp "${_tmp_tar_mb}" "${_node}:/tmp/_k8s_mb_import.tar"
+    docker exec "${_node}" ctr images import "/tmp/_k8s_mb_import.tar"
+    docker exec "${_node}" rm -f "/tmp/_k8s_mb_import.tar" 2>/dev/null
+    # Always create the docker.io/library tag — Kubernetes uses this ref.
+    docker exec "${_node}" ctr images tag "localhost/${image_tag}" "${_canonical_mb}" 2>/dev/null || true
+    log_info "  Loaded metadata-broker on ${_node}"
+  done
+  rm -f "${_tmp_tar_mb}"
+  log_ok "Metadata-broker image '${image_tag}' loaded into all cluster nodes."
+
+  METADATA_BROKER_IMAGE_IN_CLUSTER="${_canonical_mb}"
+  export METADATA_BROKER_IMAGE_IN_CLUSTER
+  log_info "Metadata-broker in-cluster image ref: ${METADATA_BROKER_IMAGE_IN_CLUSTER}"
+}
+
 # Build the operator container image and import it into k3d.
 # Sets OPERATOR_IMAGE_IN_CLUSTER to the exact image ref that containerd inside
 # the k3d nodes knows about (which may differ from OPERATOR_IMAGE when using
@@ -591,6 +633,7 @@ cluster_deploy_operator() {
   # accounts for the "localhost/" prefix that podman-based imports get).
   local image_tag="${OPERATOR_IMAGE_IN_CLUSTER:-localhost/${OPERATOR_IMAGE:-maven-operator:dev}}"
   local virtual_proxy_image="${VIRTUAL_PROXY_IMAGE_IN_CLUSTER:-localhost/${VIRTUAL_PROXY_IMAGE:-maven-virtual-proxy:dev}}"
+  local metadata_broker_image="${METADATA_BROKER_IMAGE_IN_CLUSTER:-localhost/${METADATA_BROKER_IMAGE:-maven-metadata-broker:dev}}"
   local namespace="${OPERATOR_NAMESPACE:-maven-operator-system}"
 
   # Phase 7 — pass the in-cluster import job image ref to the operator so the
@@ -648,6 +691,8 @@ spec:
               value: ${image_tag}
             - name: VIRTUAL_PROXY_IMAGE
               value: ${virtual_proxy_image}${import_job_env}
+            - name: METADATA_BROKER_IMAGE
+              value: ${metadata_broker_image}
 EOF
 
   log_step "Waiting for operator Deployment to be available…"

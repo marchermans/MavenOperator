@@ -255,6 +255,7 @@ cluster_apply_crds
 cluster_apply_rbac
 cluster_load_operator_image
 cluster_load_virtual_proxy_image
+cluster_load_metadata_broker_image
 
 log_step "Pulling/importing Reposilite image into k3d..."
 "${CONTAINER_RUNTIME}" pull "${REPOSILITE_IMAGE}"

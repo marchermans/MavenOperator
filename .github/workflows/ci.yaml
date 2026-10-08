@@ -13,6 +13,7 @@ env:
   PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-virtual-proxy
   AUTH_PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-auth-proxy
   IMPORT_JOB_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-import-job
+  METADATA_BROKER_IMAGE: ghcr.io/${{ github.repository_owner }}/maven-metadata-broker
   CHART_NAME: maven-operator
 
 jobs:
@@ -100,6 +101,13 @@ jobs:
           --logger "trx;LogFileName=unit-vp-results.trx"
           --collect "XPlat Code Coverage"
 
+      - name: Unit Tests (MavenOperator.Tests.Unit.MetadataBroker)
+        run: >
+          dotnet test MavenOperator.Tests.Unit.MetadataBroker/MavenOperator.Tests.Unit.MetadataBroker.csproj
+          --no-build --configuration Release
+          --logger "trx;LogFileName=unit-mb-results.trx"
+          --collect "XPlat Code Coverage"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -143,6 +151,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build metadata-broker image (export tarball only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.MetadataBroker/Dockerfile
+          push: false
+          tags: maven-metadata-broker:ci
+          outputs: type=docker,dest=/tmp/maven-metadata-broker.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Build auth-proxy image (export tarball only)
         uses: docker/build-push-action@v6
         with:
@@ -174,6 +193,7 @@ jobs:
             /tmp/maven-virtual-proxy.tar
             /tmp/maven-auth-proxy.tar
             /tmp/maven-import-job.tar
+            /tmp/maven-metadata-broker.tar
           retention-days: 1
 
   # ── Integration tests ───────────────────────────────────────────────────────
@@ -216,11 +236,13 @@ jobs:
           docker load -i /tmp/maven-virtual-proxy.tar
           docker load -i /tmp/maven-auth-proxy.tar
           docker load -i /tmp/maven-import-job.tar
+          docker load -i /tmp/maven-metadata-broker.tar
 
       - name: Run integration tests
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          METADATA_BROKER_IMAGE: maven-metadata-broker:ci
           # CI runners have limited RAM — use 1 agent node but raise the pod ceiling
           # so all test repositories can be scheduled without hitting the default 110 limit.
           K3D_AGENTS: "1"
@@ -289,11 +311,13 @@ jobs:
           docker load -i /tmp/maven-virtual-proxy.tar
           docker load -i /tmp/maven-auth-proxy.tar
           docker load -i /tmp/maven-import-job.tar
+          docker load -i /tmp/maven-metadata-broker.tar
 
       - name: Run E2E tests
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          METADATA_BROKER_IMAGE: maven-metadata-broker:ci
           # Raise pod ceiling for the import + e2e test repositories
           K3D_AGENTS: "1"
           K3D_MAX_PODS: "250"
@@ -338,17 +362,20 @@ jobs:
           docker load -i /tmp/maven-virtual-proxy.tar
           docker load -i /tmp/maven-auth-proxy.tar
           docker load -i /tmp/maven-import-job.tar
+          docker load -i /tmp/maven-metadata-broker.tar
 
       - name: Run performance smoke tests (xUnit ceilings)
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          METADATA_BROKER_IMAGE: maven-metadata-broker:ci
         run: ./scripts/run-tests.sh performance --perf-mode smoke
 
       - name: Run BenchmarkDotNet micro-benchmarks
         env:
           OPERATOR_IMAGE: maven-operator:ci
           VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          METADATA_BROKER_IMAGE: maven-metadata-broker:ci
         run: ./scripts/run-tests.sh performance --perf-mode benchmark
 
       - name: Upload performance test results
@@ -371,6 +398,7 @@ jobs:
       proxy_tags: ${{ steps.tags.outputs.proxy_tags }}
       auth_proxy_tags: ${{ steps.tags.outputs.auth_proxy_tags }}
       import_job_tags: ${{ steps.tags.outputs.import_job_tags }}
+      metadata_broker_tags: ${{ steps.tags.outputs.metadata_broker_tags }}
 
     steps:
       # Build the full set of Docker tags from the canonical version.
@@ -386,6 +414,7 @@ jobs:
           BASE_PX="${PROXY_IMAGE}:${VERSION}"
           BASE_AP="${AUTH_PROXY_IMAGE}:${VERSION}"
           BASE_IJ="${IMPORT_JOB_IMAGE}:${VERSION}"
+          BASE_MB="${METADATA_BROKER_IMAGE}:${VERSION}"
 
           if [[ "$IS_RELEASE" == "true" ]]; then
             MAJOR_MINOR="${VERSION%.*}"
@@ -393,22 +422,26 @@ jobs:
             PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${MAJOR_MINOR},${PROXY_IMAGE}:latest"
             AP_TAGS="${BASE_AP},${AUTH_PROXY_IMAGE}:${MAJOR_MINOR},${AUTH_PROXY_IMAGE}:latest"
             IJ_TAGS="${BASE_IJ},${IMPORT_JOB_IMAGE}:${MAJOR_MINOR},${IMPORT_JOB_IMAGE}:latest"
+            MB_TAGS="${BASE_MB},${METADATA_BROKER_IMAGE}:${MAJOR_MINOR},${METADATA_BROKER_IMAGE}:latest"
           else
             BRANCH_SAFE="$(echo "${GITHUB_REF_NAME}" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
             OP_TAGS="${BASE_OP},${OPERATOR_IMAGE}:${BRANCH_SAFE}"
             PX_TAGS="${BASE_PX},${PROXY_IMAGE}:${BRANCH_SAFE}"
             AP_TAGS="${BASE_AP},${AUTH_PROXY_IMAGE}:${BRANCH_SAFE}"
             IJ_TAGS="${BASE_IJ},${IMPORT_JOB_IMAGE}:${BRANCH_SAFE}"
+            MB_TAGS="${BASE_MB},${METADATA_BROKER_IMAGE}:${BRANCH_SAFE}"
           fi
 
           echo "operator_tags=${OP_TAGS}" >> "$GITHUB_OUTPUT"
           echo "proxy_tags=${PX_TAGS}"    >> "$GITHUB_OUTPUT"
           echo "auth_proxy_tags=${AP_TAGS}" >> "$GITHUB_OUTPUT"
           echo "import_job_tags=${IJ_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "metadata_broker_tags=${MB_TAGS}" >> "$GITHUB_OUTPUT"
           echo "Operator tags: ${OP_TAGS}"
           echo "Proxy tags:    ${PX_TAGS}"
           echo "AuthProxy tags:${AP_TAGS}"
           echo "ImportJob tags:${IJ_TAGS}"
+          echo "Broker  tags: ${MB_TAGS}"
 
   # ── Release images (4 parallel jobs, one per image) ─────────────────────────
   release-operator-image:
@@ -532,12 +565,43 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── Release Helm chart (after all images are pushed) ────────────────────────
+  release-metadata-broker-image:
+    name: Push Metadata Broker Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push metadata-broker image (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: MavenOperator.MetadataBroker/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ needs.release-tags.outputs.metadata_broker_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release-helm-chart:
     name: Publish Helm Chart
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: [version, build-and-test, docker-build, integration, performance, release-tags,
-            release-operator-image, release-virtual-proxy-image, release-auth-proxy-image, release-import-job-image]
+            release-operator-image, release-virtual-proxy-image, release-auth-proxy-image,
+            release-import-job-image, release-metadata-broker-image]
     permissions:
       contents: read
       packages: write

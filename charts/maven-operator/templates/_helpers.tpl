@@ -73,3 +73,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s:%s" .Values.importJob.image.repository $tag }}
 {{- end }}
 
+{{- define "maven-operator.metadataBrokerImage" -}}
+{{- $tag := .Values.metadataBroker.image.tag | default .Chart.AppVersion }}
+{{- printf "%s:%s" .Values.metadataBroker.image.repository $tag }}
+{{- end }}
+
