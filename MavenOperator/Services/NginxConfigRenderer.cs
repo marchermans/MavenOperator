@@ -125,7 +125,9 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
 
         var uri = new Uri(upstreamUrl.TrimEnd('/'));
         var upstreamSchemeHost = $"{uri.Scheme}://{uri.Authority}";
-        var upstreamPath       = string.IsNullOrEmpty(uri.AbsolutePath) ? "/" : uri.AbsolutePath.TrimEnd('/');
+        // Empty (not "/") so the rendered per-request URL map concatenates to
+        // "scheme://host/<path>" without a double slash for bare-host upstreams.
+        var upstreamPath       = string.IsNullOrEmpty(uri.AbsolutePath) ? "" : uri.AbsolutePath.TrimEnd('/');
 
         return ProxyTemplate.Render(new
         {

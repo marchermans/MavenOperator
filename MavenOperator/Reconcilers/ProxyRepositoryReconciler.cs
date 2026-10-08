@@ -121,8 +121,11 @@ public sealed class ProxyRepositoryReconciler(
                 entity.Status.SetCondition("UploadForbidden", isTrue: true,
                     reason: "ExternallyExposedProxy",
                     message: "Upload forwarding blocked — proxy is externally exposed. Set forceAllowOnExternal: true to override.");
-                await events.PublishAsync(entity, "Warning", "UploadBlockedExternallyExposed",
-                    $"Upload forwarding disabled for '{name}' because the proxy is externally exposed without forceAllowOnExternal.", ct: ct);
+                // KubeOps PublishAsync(entity, reason, message, type) — keep order intact so
+                // .reason/.type land in the right fields (verified against live events).
+                await events.PublishAsync(entity, "UploadBlockedExternallyExposed",
+                    $"Upload forwarding disabled for '{name}' because the proxy is externally exposed without forceAllowOnExternal.",
+                    type: "Warning", ct: ct);
 
                 // Still render NGINX config with uploads disabled
             }
@@ -147,8 +150,9 @@ public sealed class ProxyRepositoryReconciler(
                         entity.Status.SetCondition("UploadConfigurationError", isTrue: true,
                             reason: "MissingCredentialsSecret",
                             message: uploadSyncError);
-                        await events.PublishAsync(entity, "Warning", "UpstreamCredentialsMissing",
-                            $"Upload credentials Secret '{uploadSpec.UpstreamCredentialsRef.Name}' not found or unreadable.", ct: ct);
+                        await events.PublishAsync(entity, "UpstreamCredentialsMissing",
+                            $"Upload credentials Secret '{uploadSpec.UpstreamCredentialsRef.Name}' not found or unreadable.",
+                            type: "Warning", ct: ct);
 
                         // Disable uploads if credentials can't be loaded
                         uploadEnabled = false;
@@ -161,8 +165,9 @@ public sealed class ProxyRepositoryReconciler(
                     entity.Status.SetCondition("UploadConfigurationError", isTrue: true,
                         reason: "MissingCredentialsSecret",
                         message: uploadSyncError);
-                    await events.PublishAsync(entity, "Warning", "UpstreamCredentialsMissing",
-                        $"upload.upstreamCredentialsRef.name not set for '{name}'.", ct: ct);
+                    await events.PublishAsync(entity, "UpstreamCredentialsMissing",
+                        $"upload.upstreamCredentialsRef.name not set for '{name}'.",
+                        type: "Warning", ct: ct);
 
                     uploadEnabled = false;
                 }
@@ -186,8 +191,9 @@ public sealed class ProxyRepositoryReconciler(
                 entity.Status.SetCondition("UploadReady", isTrue: true,
                     reason: "UploadForwardingEnabled",
                     message: $"Upload forwarding enabled with mode={uploadMode}");
-                await events.PublishAsync(entity, "Normal", "UploadEnabled",
-                    $"Upload forwarding enabled for '{name}' (mode={uploadMode})", ct: ct);
+                await events.PublishAsync(entity, "UploadEnabled",
+                    $"Upload forwarding enabled for '{name}' (mode={uploadMode})",
+                    type: "Normal", ct: ct);
             }
         }
 
@@ -231,7 +237,7 @@ public sealed class ProxyRepositoryReconciler(
         // 4 ── Deployment ──────────────────────────────────────────────────────
         var configHash = ComputeHash(nginxConfig + downloadHtpasswd + authProxyConfigJson);
         var deployName = $"{name}-nginx";
-        var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy);
+        var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy, uploadNeedsHtpasswd);
 
         await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
 
@@ -448,6 +454,13 @@ public sealed class ProxyRepositoryReconciler(
         string ns,
         CancellationToken ct)
     {
+        // Explicit operator annotation marks the proxy as externally exposed
+        // (e.g. fronted by an out-of-band Ingress/LoadBalancer we don't manage).
+        if (entity.Metadata.Annotations is { } annotations &&
+            annotations.TryGetValue("maven.operator.io/externally-exposed", out var exposed) &&
+            string.Equals(exposed, "true", StringComparison.OrdinalIgnoreCase))
+            return true;
+
         // Check if Ingress is enabled (routes external traffic to this proxy's Service)
         if (spec.Ingress.Enabled)
             return true;
@@ -476,7 +489,7 @@ public sealed class ProxyRepositoryReconciler(
         return false;
     }
 
-    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useAuthProxy = false)
+    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useAuthProxy = false, bool uploadNeedsHtpasswd = false)
     {
         var res = spec.Resources is not null
             ? new V1ResourceRequirements { Requests = spec.Resources.Requests, Limits = spec.Resources.Limits }
@@ -502,9 +515,31 @@ public sealed class ProxyRepositoryReconciler(
             new() { Name = "download-auth", Secret    = new V1SecretVolumeSource { SecretName = $"{name}-download-htpasswd", Optional = true } },
         };
 
-        if (useAuthProxy)
+        // The upload htpasswd secret is consumed by nginx's per-method basic-auth gate in
+        // Passthrough+Authenticated mode and, when an auth-proxy sidecar runs, by that
+        // sidecar. Optional so a missing secret degrades to 403 on writes instead of
+        // blocking Pod scheduling.
+        if (uploadNeedsHtpasswd || useAuthProxy)
         {
             volumes.Add(new V1Volume { Name = "upload-auth", Secret = new V1SecretVolumeSource { SecretName = $"{name}-upload-htpasswd", Optional = true } });
+        }
+
+        if (uploadNeedsHtpasswd)
+        {
+            // nginx's limit_except gate reads /etc/nginx/upload-auth/upload.htpasswd.
+            // Mounted as a directory (secret key == filename), NOT as a file subPath inside
+            // the download-auth mount — binding a file into another volume-mounted dir fails
+            // with ENOTDIR on some containerd/runc stacks.
+            nginxVolumeMounts.Add(new V1VolumeMount
+            {
+                Name             = "upload-auth",
+                MountPath        = "/etc/nginx/upload-auth",
+                ReadOnlyProperty = true,
+            });
+        }
+
+        if (useAuthProxy)
+        {
             volumes.Add(new V1Volume { Name = "auth-proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-auth-proxy-cm" } });
         }
 

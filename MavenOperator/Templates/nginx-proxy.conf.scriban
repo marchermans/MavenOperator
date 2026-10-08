@@ -48,6 +48,19 @@ map $uri $maven_cache_control_{{ var_name }} {
     default                    "public, max-age=3600";
 }
 
+# ── Per-request upstream URL (http context) ──────────────────────────────────
+# The full target URL is computed here because:
+#   * proxy_pass with variables cannot do prefix substitution (it replaces the
+#     entire request URI), and
+#   * a plain `rewrite ... break;` in this location is silently suppressed for
+#     methods NOT listed in limit_except (PUT/DELETE) on this nginx build.
+# A map is evaluated per-request regardless of method, so reads AND uploads are
+# mapped identically: the location prefix is stripped and upstream_path prepended.
+map $uri $rs_up_url_{{ var_name }} {
+    ~^{{ path_prefix_regex }}(?<r>.*)  "{{ upstream_scheme_host }}{{ upstream_path }}/$r";
+    default                           "{{ upstream_scheme_host }}{{ upstream_path }}/";
+}
+
 {{ if upload_enabled -}}
 # ── Per-method upstream credentials for upload forwarding (http context) ────
 # 'map' only works in the http context, so it cannot live inside the location's
@@ -163,11 +176,9 @@ server {
         access_log /var/log/nginx/access.json maven_json_{{ var_name }};
         {{ end -}}
 
-        set $upstream "{{ upstream_scheme_host }}";
-
-        rewrite ^{{ path_prefix_regex }}(.*)$ {{ upstream_path }}/$1 break;
-
-        proxy_pass $upstream;
+        # Full per-request URL computed by the map in the http context (see above).
+        # Variable-only proxy_pass → the value is used as the complete upstream URL.
+        proxy_pass $rs_up_url_{{ var_name }};
 
         proxy_http_version 1.1;
         proxy_set_header Connection "";
@@ -222,9 +233,17 @@ server {
         limit_except GET HEAD OPTIONS {
             {{ if upload_mode == "Passthrough" }}{{ if upload_policy == "Authenticated" -}}
             auth_basic "Maven Upload - {{ name }}";
-            auth_basic_user_file /etc/nginx/auth/upload.htpasswd;
+            auth_basic_user_file /etc/nginx/upload-auth/upload.htpasswd;
             {{ end }}{{ end -}}
         }
+        {{ else -}}
+        # Upload forwarding disabled → proxy is a read-only cache; reject writes.
+        # NOTE: only basic-auth directives may appear inside limit_except on this
+        # nginx build, so the read-only gate uses per-method checks below.
+        # `if { return ... }` is one of the safe if usages in nginx.
+        if ($request_method = PUT)    { return 405; }
+        if ($request_method = DELETE) { return 405; }
+        if ($request_method = MKCOL)  { return 405; }
         {{ end -}}
     }
 
