@@ -11,3 +11,5 @@ riderModule.iml
 # Local tooling state (not part of the project)
 .memory/
 BenchmarkDotNet.Artifacts/
+
+.idea
