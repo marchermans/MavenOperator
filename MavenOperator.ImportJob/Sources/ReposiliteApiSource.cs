@@ -119,7 +119,7 @@ public sealed class ReposiliteApiSource : IRepositorySource
     /// <summary>Downloads the artifact bytes for streaming to the sink.</summary>
     public async Task<Stream?> OpenStreamAsync(ArtifactDescriptor artifact, CancellationToken ct)
     {
-        var url = $"{_baseUrl}/api/maven/repository/{_repository}/{artifact.RelativePath}";
+        var url = $"{_baseUrl}/{_repository}/{artifact.RelativePath}";
         try
         {
             var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
