@@ -145,7 +145,7 @@ public sealed class ReposiliteApiSourceTests
     {
         var (source, handler) = BuildSource();
         const string bytes = "jar-content";
-        handler.WhenExact($"{BaseUrl}/api/maven/repository/{Repo}/com/example/lib-1.0.jar", new HttpResponseMessage(HttpStatusCode.OK)
+        handler.WhenExact($"{BaseUrl}/{Repo}/com/example/lib-1.0.jar", new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(Encoding.UTF8.GetBytes(bytes)),
         });
@@ -162,7 +162,7 @@ public sealed class ReposiliteApiSourceTests
     public async Task OpenStreamAsync_ReturnsNull_On404()
     {
         var (source, handler) = BuildSource();
-        handler.WhenUrlContains("/api/maven/repository/", new HttpResponseMessage(HttpStatusCode.NotFound));
+        handler.WhenUrlContains("/", new HttpResponseMessage(HttpStatusCode.NotFound));
 
         var artifact = new ArtifactDescriptor { RelativePath = "com/example/missing.jar" };
         (await source.OpenStreamAsync(artifact, CancellationToken.None)).ShouldBe(null);
