@@ -715,12 +715,20 @@ public sealed class MavenRepositoryImportController(
             secretName, targetNamespace, operatorNs);
 
         // Read from operator namespace
-        V1Secret source;
+        V1Secret? source;
         try
         {
             source = await k8s.GetAsync<V1Secret>(secretName, operatorNs, ct);
         }
         catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            logger.LogWarning(
+                "imagePullSecret '{SecretName}' not found in operator namespace '{OperatorNamespace}' — import jobs may fail to pull images",
+                secretName, operatorNs);
+            return;
+        }
+
+        if (source == null)
         {
             logger.LogWarning(
                 "imagePullSecret '{SecretName}' not found in operator namespace '{OperatorNamespace}' — import jobs may fail to pull images",

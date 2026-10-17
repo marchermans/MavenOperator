@@ -52,7 +52,7 @@ map $uri $maven_cache_control_{{ var_name }} {
 # repository's path prefix, keep the leading slash. The broker receives e.g.
 # /com/acme/lib/maven-metadata.xml and classifies it from there.
 map $uri $meta_rel_{{ var_name }} {
-    ~^{{ path_prefix_regex }}/?(.*)   /\1;
+    ~^{{ path_prefix_regex }}/?(.*)   /$1;
     default                          $uri;
 }
 
@@ -179,7 +179,10 @@ server {
         proxy_pass http://127.0.0.1:8091$meta_rel_{{ var_name }};
 
         # Broker unavailable (sidecar crash/restart) → short retry instead of an opaque 5xx.
-        error_page 502 504 @meta_broker_down_{{ var_name }};
+        # The =409 is required: without it, nginx runs the named location (body + headers)
+        # but keeps the original upstream error status in the response line (verified on
+        # nginx 1.27.5). With =409 the client sees a proper 409 Conflict.
+        error_page 502 504 =409 @meta_broker_down_{{ var_name }};
     }
 
     # Fallback when the metadata broker cannot be reached: ask dav clients to retry shortly.

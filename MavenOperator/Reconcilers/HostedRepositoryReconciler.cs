@@ -71,8 +71,10 @@ public sealed class HostedRepositoryReconciler(
         var uploadUsesAuthProxy = spec.Auth.Upload.CiTrust.Count > 0
                                   || spec.Auth.Upload.Acls.Count > 0;
 
-        var downloadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Download, ns, ct);
-        var uploadHtpasswd = await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct);
+        var downloadHtpasswd = await BuildHtpasswdAsync(
+            spec.Auth.Download, $"{name}-download-htpasswd", "download.htpasswd", ns, ct);
+        var uploadHtpasswd = await BuildHtpasswdAsync(
+            spec.Auth.Upload, $"{name}-upload-htpasswd", "upload.htpasswd", ns, ct);
 
         await resources.EnsureSecretAsync(entity, $"{name}-download-htpasswd",
             new Dictionary<string, string> { ["download.htpasswd"] = downloadHtpasswd }, ct);
@@ -115,11 +117,20 @@ public sealed class HostedRepositoryReconciler(
         }
 
         // 4 ── Deployment ──────────────────────────────────────────────────────
-        var configHash    = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswd + authProxyConfigJson);
         var deployName    = $"{name}-nginx";
         var podSpec       = BuildPodSpec(name, spec, useAuthProxy);
 
-        await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
+        // Per-component config hashes: one annotation each (maven.operator.io/<kind>-hash)
+        // so a rollout is traceable back to exactly which component changed.
+        var componentHashes = new Dictionary<string, string>
+        {
+            ["nginx"]              = ComputeHash(nginxConfig),
+            ["download-passwords"] = ComputeHash(downloadHtpasswd),
+            ["upload-passwords"]   = ComputeHash(uploadHtpasswd),
+            ["auth-proxy"]         = ComputeHash(authProxyConfigJson),
+        };
+
+        await resources.EnsureDeploymentAsync(entity, deployName, componentHashes, podSpec, replicas: 1, ct);
 
         // 5 ── Service ─────────────────────────────────────────────────────────
         var servicePorts = BuildServicePorts(spec.Metrics);
@@ -240,6 +251,8 @@ public sealed class HostedRepositoryReconciler(
     /// </summary>
     private async Task<string> BuildHtpasswdAsync(
         AuthPolicySpec policy,
+        string htpasswdSecretName,
+        string htpasswdKey,
         string ns,
         CancellationToken ct)
     {
@@ -261,7 +274,19 @@ public sealed class HostedRepositoryReconciler(
             credentials.Add((username, password));
         }
 
-        return htpasswd.BuildHtpasswd(credentials.DistinctBy(c => c.Item1));
+        // Read the previously written htpasswd file so unchanged passwords keep their
+        // existing bcrypt hashes. BCrypt salts are random per hash call — rebuilding from
+        // scratch would change the file bytes on every reconcile, churn the config hash,
+        // and roll the NGINX Deployment on each pass (breaking in-flight uploads).
+        string? existing = null;
+        var existingSecret = await k8s.GetAsync<k8s.Models.V1Secret>(htpasswdSecretName, ns, ct);
+        if (existingSecret?.Data is { } data &&
+            data.TryGetValue(htpasswdKey, out var raw))
+        {
+            existing = Encoding.UTF8.GetString(raw);
+        }
+
+        return htpasswd.BuildHtpasswdStable(credentials.DistinctBy(c => c.Item1), existing);
     }
 
     private static string GetSecretKey(k8s.Models.V1Secret secret, string key, string secretName)
@@ -435,8 +460,11 @@ public sealed class HostedRepositoryReconciler(
                 new() { Name = "ASPNETCORE_URLS", Value = $"http://127.0.0.1:{MetadataBrokerPort}" },
             },
             VolumeMounts = [new V1VolumeMount { Name = "repository", MountPath = RepositoryPath }],
-            LivenessProbe  = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = MetadataBrokerPort }, InitialDelaySeconds = 5, PeriodSeconds = 15 },
-            ReadinessProbe = new V1Probe { HttpGet = new V1HTTPGetAction { Path = "/healthz", Port = MetadataBrokerPort }, InitialDelaySeconds = 3, PeriodSeconds = 10 },
+            // exec probes (not httpGet): the kubelet dials HTTP probes against the pod IP
+            // from outside the pod's netns, which can never reach a loopback-only bind.
+            // The broker's --health-probe mode runs inside the container where 127.0.0.1 works.
+            LivenessProbe  = new V1Probe { Exec = new V1ExecAction { Command = ["dotnet", "/app/MavenOperator.MetadataBroker.dll", "--health-probe"] }, InitialDelaySeconds = 5, PeriodSeconds = 15, TimeoutSeconds = 10, FailureThreshold = 3 },
+            ReadinessProbe = new V1Probe { Exec = new V1ExecAction { Command = ["dotnet", "/app/MavenOperator.MetadataBroker.dll", "--health-probe"] }, InitialDelaySeconds = 3, PeriodSeconds = 10, TimeoutSeconds = 10 },
             Resources = new V1ResourceRequirements
             {
                 Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },

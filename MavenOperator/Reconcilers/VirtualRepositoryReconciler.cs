@@ -633,7 +633,7 @@ public sealed class VirtualRepositoryReconciler(
                 case RepositoryType.Proxy:
                     // Proxy targets require upload forwarding to be enabled on the upstream repo.
                     var proxyRepo = await k8s.GetAsync<MavenRepositoryV1Alpha1>(target.Name, ns, ct);
-                    if (proxyRepo?.Spec.Upstream.Upload.Enabled != true)
+                    if (proxyRepo?.Spec.Upstream?.Upload.Enabled != true)
                         throw new InvalidOperationException(
                             $"Upload target '{target.Name}' is a Proxy repository but does not have upload forwarding enabled. " +
                             $"Set spec.upstream.upload.enabled: true on the target repository.");

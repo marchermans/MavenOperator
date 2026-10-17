@@ -89,4 +89,101 @@ public sealed class HtpasswdServiceTests
         BCrypt.Net.BCrypt.Verify("correcthorsebatterystaple", hash).ShouldBeTrue();
         BCrypt.Net.BCrypt.Verify("wrongpassword", hash).ShouldBeFalse();
     }
+
+    // ── BuildHtpasswdStable ────────────────────────────────────────────────
+
+    [Fact]
+    public void BuildHtpasswdStable_UnchangedCredentials_ReturnsIdenticalBytes()
+    {
+        var credentials = new[] { ("deployer", "pw1"), ("ci-bot", "pw2") };
+        var first  = _sut.BuildHtpasswd(credentials);
+        // A second reconcile with the same spec must not re-salt the hashes —
+        // byte-stability is what keeps the operator's config hash stable.
+        var second = _sut.BuildHtpasswdStable(credentials, first);
+        second.ShouldBe(first);
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_ChangedPassword_RehashesOnlyThatLine()
+    {
+        var original = _sut.BuildHtpasswd(new[] { ("deployer", "pw1"), ("ci-bot", "pw2") });
+        var lines = original.Split('\n');
+
+        var updated  = _sut.BuildHtpasswdStable(
+            new[] { ("deployer", "pw1"), ("ci-bot", "CHANGED") }, original);
+        var newLines = updated.Split('\n');
+
+        // Unchanged user keeps the exact same bcrypt line (same salt).
+        newLines[0].ShouldBe(lines[0]);
+        // Changed user gets a fresh hash that verifies against the NEW password.
+        newLines[1].ShouldStartWith("ci-bot:");
+        newLines[1].ShouldNotBe(lines[1]);
+        BCrypt.Net.BCrypt.Verify("CHANGED", newLines[1].Split(':')[1]).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_NewUser_Appended_OldLinesPreserved()
+    {
+        var original = _sut.BuildHtpasswd(new[] { ("deployer", "pw1") });
+
+        var updated = _sut.BuildHtpasswdStable(
+            new[] { ("deployer", "pw1"), ("admin", "pw3") }, original);
+        var newLines = updated.Split('\n');
+
+        newLines.Length.ShouldBe(2);
+        newLines[0].ShouldBe(original);   // old line reused byte-for-byte
+        newLines[1].ShouldStartWith("admin:");
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_RemovedUser_Dropped()
+    {
+        var original = _sut.BuildHtpasswd(new[] { ("deployer", "pw1"), ("ci-bot", "pw2") });
+
+        var updated = _sut.BuildHtpasswdStable(
+            new[] { ("deployer", "pw1") }, original);
+
+        updated.Split('\n').Length.ShouldBe(1);
+        updated.ShouldStartWith("deployer:");
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_MalformedExistingLine_Rehashed()
+    {
+        const string bogus = "user:not-a-bcrypt-hash";
+
+        var result = _sut.BuildHtpasswdStable(new[] { ("user", "pw1") }, bogus);
+
+        // Unverifiable line is replaced by a real, verifiable bcrypt hash.
+        BCrypt.Net.BCrypt.Verify("pw1", result.Split(':')[1]).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_NoExistingContent_HashesAllUsers()
+    {
+        // With no previous file there is nothing to reuse — every user must be
+        // freshly hashed (two independent fresh calls can't be compared byte-wise:
+        // bcrypt salts are random by design).
+        var credentials = new[] { ("deployer", "pw1"), ("ci-bot", "pw2") };
+        var result = _sut.BuildHtpasswdStable(credentials, null);
+        var lines  = result.Split('\n');
+
+        lines.Length.ShouldBe(2);
+        BCrypt.Net.BCrypt.Verify("pw1", lines[0].Split(':')[1]).ShouldBeTrue();
+        BCrypt.Net.BCrypt.Verify("pw2", lines[1].Split(':')[1]).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_ReuseIsCaseInsensitive()
+    {
+        var original = _sut.BuildHtpasswd(new[] { ("Deployer", "pw1") });
+
+        // Same logical user, different case — the previous hash must be reused,
+        // not re-salted.
+        var updated = _sut.BuildHtpasswdStable(new[] { ("deployer", "pw1") }, original);
+
+        var line   = updated.Split('\n')[0];
+        line.ShouldStartWith("deployer:");
+        line.Split(':')[1].ShouldBe(original.Split(':')[1]); // identical salt/hash
+    }
 }

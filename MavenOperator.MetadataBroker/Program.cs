@@ -6,6 +6,29 @@ using MavenOperator.MetadataBroker.Services;
 // NGINX (which strips the repository prefix and routes maven-metadata.xml here).
 // See .agent/plan/maven-metadata/hosted-metadata-broker.md for the full design.
 
+// ── Probe mode ─────────────────────────────────────────────────────────────
+// The kubelet runs httpGet/tcSocket probes from OUTSIDE the pod's network
+// namespace (against the pod IP), which can never reach a loopback-only bind.
+// The operator therefore wires exec probes that run this lightweight client
+// *inside* the container, where 127.0.0.1 is reachable:
+//   dotnet MavenOperator.MetadataBroker.dll --health-probe
+// Exit code: 0 when /healthz answers with a success status, 1 on any failure
+// (Kubernetes treats every non-zero exit as probe failure).
+if (args.Length > 0 && args[0] == "--health-probe")
+{
+    var baseUri = Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://127.0.0.1:8091";
+    try
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var resp = await http.GetAsync($"{baseUri.TrimEnd('/')}/healthz");
+        return resp.IsSuccessStatusCode ? 0 : 1;
+    }
+    catch
+    {
+        return 1;
+    }
+}
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.SetMinimumLevel(LogLevel.Information);
 builder.WebHost.UseUrls(
@@ -45,6 +68,7 @@ app.MapDelete("/{**path}",
         new BrokerResult(await b.DeleteAsync(RelPath(req))));
 
 app.Run();
+return 0;
 
 /// <summary>Minimal-API result adapter for the framework-free MetadataResponse.</summary>
 file sealed class BrokerResult : IResult

@@ -9,7 +9,8 @@ namespace MavenOperator.Tests.E2E.Hosted;
 /// End-to-end tests for Hosted repositories.
 ///
 /// Validates the complete user workflow:
-///   1. Operator provisions a Hosted repo from a CRD (done in E2EFixture).
+///   1. Operator provisions a Hosted repo from a CRD (done per test in E2EFixture —
+///      every test method gets its own repository, so no two tests share state).
 ///   2. Maven/Gradle clients deploy artifacts via HTTP PUT (WebDAV).
 ///   3. Clients resolve artifacts via HTTP GET.
 ///   4. Auth policies are enforced correctly.
@@ -17,10 +18,17 @@ namespace MavenOperator.Tests.E2E.Hosted;
 /// Run with: E2E_TESTS=true dotnet test --filter Category=E2E
 /// Pre-requisite: operator running in cluster + E2E_REPO_BASE_URL pointing at the ingress.
 /// </summary>
-[Collection(E2ECollection.CollectionName)]
+// Per-test scoping: xUnit instantiates this class once per test method, so the
+// field below is a fresh E2EFixture for every test — each one provisions its own
+// repository and tears it down afterwards (no shared state between tests).
 [Trait("Category", "E2E")]
-public sealed class HostedRepositoryE2ETests(E2EFixture e2e)
+public sealed class HostedRepositoryE2ETests : IAsyncLifetime
 {
+    private readonly E2EFixture e2e = new();
+
+    public async Task InitializeAsync() => await e2e.InitializeAsync();
+    public async Task DisposeAsync()  => await e2e.DisposeAsync();
+
     private static readonly string FixturesDir =
         Path.Combine(AppContext.BaseDirectory, "Fixtures");
 

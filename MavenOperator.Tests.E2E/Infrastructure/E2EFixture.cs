@@ -12,13 +12,17 @@ using System.Text;
 namespace MavenOperator.Tests.E2E.Infrastructure;
 
 /// <summary>
-/// xUnit fixture for E2E tests.
-/// Provisions a MavenRepository CRD, waits for the operator to bring it Ready,
-/// and exposes the repository's HTTP URL for Maven/Gradle clients.
+/// Fixture for E2E hosted-repository tests — scoped to a single test method.
 ///
-/// When E2E_REPO_BASE_URL is not set the fixture automatically starts a
-/// <c>kubectl port-forward</c> tunnel to the ClusterIP Service so the tests
-/// can reach the in-cluster NGINX from the developer workstation.
+/// Created by each test class instance via field initializer + IAsyncLifetime:
+/// every test gets
+/// its own MavenRepository CRD + PVC + nginx deployment and its own ephemeral
+/// <c>kubectl port-forward</c> tunnel, so no two tests ever share a repository or
+/// can influence each other. The repo is deleted after the test completes.
+///
+/// When E2E_REPO_BASE_URL is not set, each fixture instance starts its own
+/// <c>kubectl port-forward</c> to the ClusterIP Service on an ephemeral local
+/// port so tests can reach the in-cluster NGINX from the workstation.
 /// </summary>
 public sealed class E2EFixture : IAsyncLifetime
 {
@@ -368,9 +372,4 @@ public sealed class E2EFixture : IAsyncLifetime
 }
 
 
-[CollectionDefinition(E2ECollection.CollectionName)]
-public sealed class E2ECollection : ICollectionFixture<E2EFixture>
-{
-    public const string CollectionName = "E2E";
-}
 

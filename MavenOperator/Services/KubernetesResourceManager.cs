@@ -42,11 +42,26 @@ public interface IKubernetesResourceManager
     /// <summary>
     /// Ensures an NGINX Deployment exists. If the config hash changes (content-addressed),
     /// the pod template annotation is updated to trigger a rolling restart.
+    /// The hash is stored under the legacy maven.operator.io/config-hash key.
     /// </summary>
     Task<V1Deployment> EnsureDeploymentAsync(
         MavenRepositoryV1Alpha1 owner,
         string deploymentName,
         string configHash,
+        V1PodSpec podSpec,
+        int replicas,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Ensures an NGINX Deployment exists, tracking one content hash per component.
+    /// Each entry (kind → SHA-256) is written as its own pod-template annotation so
+    /// per-component changes are observable. Any changed, missing or stale hash
+    /// triggers a rolling restart.
+    /// </summary>
+    Task<V1Deployment> EnsureDeploymentAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string deploymentName,
+        IReadOnlyDictionary<string, string> configHashes,
         V1PodSpec podSpec,
         int replicas,
         CancellationToken ct);
@@ -381,27 +396,63 @@ public sealed class KubernetesResourceManager(
 
     // ── Deployment ───────────────────────────────────────────────────────────
 
-    public async Task<V1Deployment> EnsureDeploymentAsync(
+    /// <summary>
+    /// Backwards-compatible single-hash overload. The hash is stored under the
+    /// legacy annotation key maven.operator.io/config-hash (kind "config").
+    /// </summary>
+    public Task<V1Deployment> EnsureDeploymentAsync(
         MavenRepositoryV1Alpha1 owner,
         string deploymentName,
         string configHash,
         V1PodSpec podSpec,
         int replicas,
         CancellationToken ct)
+        => EnsureDeploymentAsync(owner, deploymentName,
+            new Dictionary<string, string> { ["config"] = configHash },
+            podSpec, replicas, ct);
+
+    /// <summary>
+    /// Ensures an NGINX Deployment exists. Each entry maps a hash kind (e.g.
+    /// "nginx", "download-passwords") to the SHA-256 of that component's content;
+    /// one annotation per kind is written on the pod template so changes are
+    /// observable per component. Any difference (missing, changed or stale hash
+    /// annotations) triggers a rolling restart.
+    /// </summary>
+    public async Task<V1Deployment> EnsureDeploymentAsync(
+        MavenRepositoryV1Alpha1 owner,
+        string deploymentName,
+        IReadOnlyDictionary<string, string> configHashes,
+        V1PodSpec podSpec,
+        int replicas,
+        CancellationToken ct)
     {
-        var ns    = owner.Metadata.NamespaceProperty!;
+        var ns     = owner.Metadata.NamespaceProperty!;
         var labels = new Dictionary<string, string> { ["app"] = deploymentName };
+
+        // Desired annotation key per kind; "config" keeps the legacy key name.
+        var desiredAnnotations = configHashes.ToDictionary(
+            kv => HashAnnotationKey(kv.Key),
+            kv => kv.Value);
 
         for (var attempt = 0; attempt < 4; attempt++)
         {
             var existing = await client.GetAsync<V1Deployment>(deploymentName, ns, ct);
             if (existing is not null)
             {
-                var currentHash = existing.Spec?.Template?.Metadata?.Annotations is { } ann
-                    ? ann.TryGetValue(ConfigHashAnnotation, out var h) ? h : null
-                    : null;
+                var currentAnnotations = existing.Spec?.Template?.Metadata?.Annotations;
 
-                if (currentHash == configHash)
+                // Changed when any desired key is missing/different, or a stale
+                // managed hash annotation lingers (e.g. after migrating from the
+                // single composite "config" hash to per-component hashes).
+                var changedKinds = configHashes
+                    .Where(kv => currentAnnotations?.TryGetValue(HashAnnotationKey(kv.Key), out var v) != true || v != kv.Value)
+                    .Select(kv => kv.Key)
+                    .Concat(currentAnnotations?.
+                        Where(aa => IsManagedHashAnnotation(aa.Key) && !desiredAnnotations.ContainsKey(aa.Key))
+                        .Select(aa => aa.Key) ?? [])
+                    .ToList();
+
+                if (changedKinds.Count == 0)
                 {
                     logger.LogDebug("Deployment {Namespace}/{Name} config unchanged", ns, deploymentName);
                     return existing;
@@ -409,15 +460,19 @@ public sealed class KubernetesResourceManager(
 
                 try
                 {
-                    // Config changed — update annotation to trigger rolling restart.
+                    // Config changed — update annotations to trigger rolling restart.
                     existing.Spec!.Template.Metadata!.Annotations ??= new Dictionary<string, string>();
-                    existing.Spec.Template.Metadata.Annotations[ConfigHashAnnotation] = configHash;
+                    var ann = existing.Spec.Template.Metadata.Annotations;
+                    foreach (var kv in configHashes)
+                        ann[HashAnnotationKey(kv.Key)] = kv.Value;
+                    foreach (var key in ann.Where(a => IsManagedHashAnnotation(a.Key) && !desiredAnnotations.ContainsKey(a.Key)).Select(a => a.Key).ToList())
+                        ann.Remove(key);
                     existing.Spec.Template.Spec = podSpec;
 
                     var updated = await client.UpdateAsync(existing, ct);
                     logger.LogInformation(
-                        "Updated Deployment {Namespace}/{Name} (new config hash: {Hash})",
-                        ns, deploymentName, configHash);
+                        "Updated Deployment {Namespace}/{Name} (changed config hashes: {Kinds})",
+                        ns, deploymentName, string.Join(", ", changedKinds));
                     return updated;
                 }
                 catch (HttpOperationException ex) when (IsConflict(ex))
@@ -441,10 +496,7 @@ public sealed class KubernetesResourceManager(
                             Metadata = new V1ObjectMeta
                             {
                                 Labels      = labels,
-                                Annotations = new Dictionary<string, string>
-                                {
-                                    [ConfigHashAnnotation] = configHash,
-                                },
+                                Annotations = desiredAnnotations.ToDictionary(kv => kv.Key, kv => kv.Value),
                             },
                             Spec = podSpec,
                         },
@@ -463,6 +515,19 @@ public sealed class KubernetesResourceManager(
 
         throw new InvalidOperationException($"Failed to ensure Deployment {ns}/{deploymentName} after retries.");
     }
+
+    /// <summary>
+    /// Annotation key for a config-hash kind: maven.operator.io/&lt;kind&gt;-hash.
+    /// The legacy single-hash overload uses kind "config", which yields exactly
+    /// the historical maven.operator.io/config-hash name.
+    /// </summary>
+    private static string HashAnnotationKey(string kind) =>
+        $"maven.operator.io/{kind}-hash";
+
+    /// <summary>True for any managed per-component config-hash annotation.</summary>
+    private static bool IsManagedHashAnnotation(string key) =>
+        key.StartsWith("maven.operator.io/", StringComparison.Ordinal)
+        && key.EndsWith("-hash", StringComparison.Ordinal);
 
     // ── Service ──────────────────────────────────────────────────────────────
 

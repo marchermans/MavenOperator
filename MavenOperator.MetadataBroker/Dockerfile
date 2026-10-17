@@ -1,17 +1,17 @@
 # ── .NET SDK build stage ────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
-WORKDIR /build
-
-COPY MavenOperator.MetadataBroker/MavenOperator.MetadataBroker.csproj \
-     MavenOperator.MetadataBroker/
-
-RUN dotnet restore MavenOperator.MetadataBroker
+WORKDIR /src
 
 COPY MavenOperator.MetadataBroker/ .
-RUN dotnet publish MavenOperator.MetadataBroker -c Release -o /out --no-restore
+
+# The host's obj/ may ride along in the build context — start from a clean slate.
+RUN rm -rf obj && dotnet restore
+RUN dotnet publish -c Release -o /out --no-restore
 
 # ── Runtime stage ───────────────────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/runtime:10.0
+# aspnet (not plain runtime) — the broker is an ASP.NET Core Minimal API and needs
+# the Microsoft.AspNetCore.App shared framework.
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 
 COPY --from=builder /out .

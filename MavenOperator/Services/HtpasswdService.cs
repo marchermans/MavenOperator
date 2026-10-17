@@ -31,19 +31,98 @@ public sealed class HtpasswdService : IHtpasswdService
 
         foreach (var (username, password) in credentials)
         {
-            if (string.IsNullOrWhiteSpace(username))
-                throw new ArgumentException("Username must not be blank.", nameof(credentials));
-            if (string.IsNullOrWhiteSpace(password))
-                throw new ArgumentException($"Password for user '{username}' must not be blank.", nameof(credentials));
-            if (!seen.Add(username))
-                throw new ArgumentException(
-                    $"Duplicate username '{username}' detected. Usernames must be unique within a policy.",
-                    nameof(credentials));
-
+            Validate(username, password, credentials, seen);
             lines.Add(HashPassword(username, password));
         }
 
         return string.Join('\n', lines);
+    }
+
+    /// <inheritdoc/>
+    public string BuildHtpasswdStable(
+        IEnumerable<(string Username, string Password)> credentials,
+        string? existingContent)
+    {
+        ArgumentNullException.ThrowIfNull(credentials);
+
+        var previous = ParseExisting(existingContent);
+        var lines = new List<string>();
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (username, password) in credentials)
+        {
+            Validate(username, password, credentials, seen);
+
+            // Reuse the previous hash when it still verifies against the current
+            // password — bcrypt salts are random per call, so re-hashing would change
+            // the file bytes (and thus the operator's config hash) on every reconcile.
+            if (previous.TryGetValue(username, out var previousHash)
+                && Verifies(password, previousHash))
+            {
+                lines.Add($"{username}:{previousHash}");
+            }
+            else
+            {
+                lines.Add(HashPassword(username, password));
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static void Validate(
+        string username,
+        string password,
+        IEnumerable<(string Username, string Password)> credentials,
+        HashSet<string> seen)
+    {
+        if (string.IsNullOrWhiteSpace(username))
+            throw new ArgumentException("Username must not be blank.", nameof(credentials));
+        if (string.IsNullOrWhiteSpace(password))
+            throw new ArgumentException($"Password for user '{username}' must not be blank.", nameof(credentials));
+        if (!seen.Add(username))
+            throw new ArgumentException(
+                $"Duplicate username '{username}' detected. Usernames must be unique within a policy.",
+                nameof(credentials));
+    }
+
+    /// <summary>
+    /// Parses existing htpasswd content into a (case-insensitive) username → hash map.
+    /// Malformed lines are ignored — they will simply be re-hashed for the current spec.
+    /// </summary>
+    private static Dictionary<string, string> ParseExisting(string? content)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(content))
+            return map;
+
+        foreach (var line in content.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0)
+                continue;
+
+            var separator = trimmed.IndexOf(':');
+            if (separator <= 0)
+                continue;
+
+            map.TryAdd(trimmed[..separator], trimmed[(separator + 1)..]);
+        }
+
+        return map;
+    }
+
+    private static bool Verifies(string password, string hash)
+    {
+        try
+        {
+            return BC.Verify(password, hash);
+        }
+        catch
+        {
+            // Malformed/legacy/foreign hash format — treat as unverifiable and re-hash.
+            return false;
+        }
     }
 }
 

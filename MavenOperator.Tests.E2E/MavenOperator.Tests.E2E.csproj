@@ -19,8 +19,9 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Shouldly"                  Version="4.3.0" />
-    <PackageReference Include="KubeOps.KubernetesClient"  Version="10.5.0" />
-    <PackageReference Include="KubeOps.Operator"          Version="10.5.0" />
+    <!-- Kept in lockstep with MavenOperator.csproj (NU1605 downgrade otherwise). -->
+    <PackageReference Include="KubeOps.KubernetesClient"  Version="13.3.3" />
+    <PackageReference Include="KubeOps.Operator"          Version="13.3.3" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../MavenOperator/MavenOperator.csproj" />
