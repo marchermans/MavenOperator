@@ -196,7 +196,9 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
         var cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-nginx-cm", cluster.Namespace, CancellationToken.None);
         cm.ShouldNotBeNull();
         var conf = cm.Data!["default.conf"];
-        conf.ShouldContain("location ~ ^/");
+        // Root path prefix renders as a plain `location /` block (the per-request
+        // upstream URL is computed by the http-context map, not regex rewrites).
+        conf.ShouldContain("location / {");
         conf.ShouldNotContain($"/repository/{name}/");
         entity.Status.Url.ShouldBe($"http://{name}-svc");
     }

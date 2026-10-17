@@ -104,7 +104,7 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
     // ── Hosted: metrics enabled ──────────────────────────────────────────────
 
     [IntegrationFact]
-    public async Task Hosted_MetricsEnabled_Deployment_HasThreeContainers()
+    public async Task Hosted_MetricsEnabled_Deployment_HasFourContainers()
     {
         var name = $"int-m6a-hd-{Guid.NewGuid().ToString("N")[..6]}";
         var entity = await CreateHostedEntityAsync(name, metricsEnabled: true);
@@ -116,10 +116,11 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
 
         dep.ShouldNotBeNull();
         var containers = dep!.Spec.Template.Spec.Containers.ToList();
-        containers.Count.ShouldBe(3,
-            "Metrics-enabled Hosted deployment must have nginx + nginx-exporter + mtail containers");
+        containers.Count.ShouldBe(4,
+            "Metrics-enabled Hosted deployment must have nginx + metadata-broker + nginx-exporter + mtail containers");
 
         containers.ShouldContain(c => c.Name == "nginx",          "nginx container required");
+        containers.ShouldContain(c => c.Name == "metadata-broker", "metadata broker sidecar is always present");
         containers.ShouldContain(c => c.Name == "nginx-exporter", "nginx-prometheus-exporter sidecar required");
         containers.ShouldContain(c => c.Name == "mtail",          "mtail sidecar required");
     }
@@ -213,18 +214,22 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
     // ── Hosted: metrics disabled ─────────────────────────────────────────────
 
     [IntegrationFact]
-    public async Task Hosted_MetricsDisabled_Deployment_HasOnlyNginxContainer()
+    public async Task Hosted_MetricsDisabled_Deployment_HasNginxAndBrokerContainers()
     {
         var name   = $"int-m6a-off-{Guid.NewGuid().ToString("N")[..6]}";
         var entity = await CreateHostedEntityAsync(name, metricsEnabled: false);
 
         await BuildHostedReconciler().ReconcileAsync(entity, CancellationToken.None);
 
-        var dep = await cluster.Client.GetAsync<V1Deployment>(
+        var dep      = await cluster.Client.GetAsync<V1Deployment>(
             $"{name}-nginx", cluster.Namespace, CancellationToken.None);
+        var containers = dep!.Spec.Template.Spec.Containers.ToList();
 
-        dep!.Spec.Template.Spec.Containers.Count.ShouldBe(1,
-            "Metrics-disabled Hosted deployment must have exactly one container (nginx)");
+        // The metadata broker sidecar is always present; metrics-disabled adds no sidecars.
+        containers.Count.ShouldBe(2,
+            "Metrics-disabled Hosted deployment must have exactly nginx + metadata-broker containers");
+        containers.ShouldContain(c => c.Name == "nginx",           "nginx container required");
+        containers.ShouldContain(c => c.Name == "metadata-broker", "metadata broker sidecar is always present");
     }
 
     [IntegrationFact]
@@ -352,7 +357,7 @@ public sealed class MetricsSidecarIntegrationTests(ClusterFixture cluster)
         var dep = await cluster.Client.GetAsync<V1Deployment>(
             $"{name}-nginx", cluster.Namespace, CancellationToken.None);
 
-        dep!.Spec.Template.Spec.Containers.Count.ShouldBe(3,
+        dep!.Spec.Template.Spec.Containers.Count.ShouldBe(4,
             "Idempotent second reconcile must not duplicate sidecar containers");
     }
 }

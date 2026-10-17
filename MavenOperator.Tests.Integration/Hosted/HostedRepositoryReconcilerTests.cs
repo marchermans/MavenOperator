@@ -211,9 +211,10 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
 
         await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
 
+        // Per-component hashes: the rendered nginx config lives under maven.operator.io/nginx-hash.
         var dep1 = await cluster.Client.GetAsync<V1Deployment>(
             $"{name}-nginx", cluster.Namespace, CancellationToken.None);
-        var hash1 = dep1!.Spec!.Template!.Metadata!.Annotations!["maven.operator.io/config-hash"];
+        var hash1 = dep1!.Spec!.Template!.Metadata!.Annotations!["maven.operator.io/nginx-hash"];
 
         // Switch download policy — config changes → hash must change → rolling restart triggered
         entity.Spec.Auth.Download = new()
@@ -225,7 +226,7 @@ public sealed class HostedRepositoryReconcilerTests(ClusterFixture cluster)
 
         var dep2 = await cluster.Client.GetAsync<V1Deployment>(
             $"{name}-nginx", cluster.Namespace, CancellationToken.None);
-        var hash2 = dep2!.Spec!.Template!.Metadata!.Annotations!["maven.operator.io/config-hash"];
+        var hash2 = dep2!.Spec!.Template!.Metadata!.Annotations!["maven.operator.io/nginx-hash"];
 
         hash2.ShouldNotBe(hash1, "config hash must change to trigger rolling restart");
     }
