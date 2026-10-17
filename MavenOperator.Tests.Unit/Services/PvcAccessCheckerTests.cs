@@ -24,8 +24,8 @@ public sealed class PvcAccessCheckerTests
         var k8s = Substitute.For<IKubernetesClient>();
         k8s.GetAsync<V1PersistentVolumeClaim>(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(pvc);
-        // KubeOps v10 signature: ListAsync<T>(string ns, string? selector = null, CancellationToken ct).
-        k8s.ListAsync<V1Pod>(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        // KubeOps v13 signature: ListAsync<T>(string ns, string? labelSelector, string? fieldSelector, CancellationToken ct).
+        k8s.ListAsync<V1Pod>(Arg.Any<string>(), Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns(pods ?? []);
 
         return (new PvcAccessChecker(k8s, NullLogger<PvcAccessChecker>.Instance), k8s);

@@ -40,7 +40,7 @@ public sealed class CredentialSecretControllerTests
         result.IsSuccess.ShouldBeTrue();
         // No list call should have been made
         await _k8s.DidNotReceive().ListAsync<MavenRepositoryV1Alpha1>(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string>(), null!, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class CredentialSecretControllerTests
         await _sut.ReconcileAsync(secret, CancellationToken.None);
 
         await _k8s.DidNotReceive().ListAsync<MavenRepositoryV1Alpha1>(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string>(), null!, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildHostedRepo("my-repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
@@ -78,7 +78,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildHostedRepo("my-repo", ns, uploadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
@@ -94,7 +94,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildProxyRepo("my-proxy", ns, upstreamSecretRef: secretName);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
@@ -108,7 +108,7 @@ public sealed class CredentialSecretControllerTests
     {
         const string ns = "maven";
         var repo = BuildHostedRepo("my-repo", ns, downloadSecretRefs: ["other-secret"]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret("unrelated-secret", ns, hasCredentialLabel: true);
@@ -123,7 +123,7 @@ public sealed class CredentialSecretControllerTests
         const string secretName = "creds";
         const string ns = "ns";
         var repo = BuildHostedRepo("repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
@@ -146,7 +146,7 @@ public sealed class CredentialSecretControllerTests
         const string secretName = "creds";
         const string ns = "ns";
         var repo = BuildHostedRepo("repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
@@ -163,7 +163,7 @@ public sealed class CredentialSecretControllerTests
 
         var repo1 = BuildHostedRepo("repo1", ns, downloadSecretRefs: [secretName]);
         var repo2 = BuildHostedRepo("repo2", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
             .Returns([repo1, repo2]);
 
         // First reconcile throws

@@ -34,7 +34,10 @@ public sealed class OrphanedResourceCleanupTests
             .ReturnsForAnyArgs(new V1Secret());
         resources.EnsureConfigMapAsync(default!, default!, default!, default)
             .ReturnsForAnyArgs(new V1ConfigMap());
-        resources.EnsureDeploymentAsync(default!, default!, default!, default!, default, default)
+        // Stub both EnsureDeploymentAsync overloads explicitly (string hash vs per-component dict).
+        resources.EnsureDeploymentAsync(default!, default!, (IReadOnlyDictionary<string, string>)null!, default!, default, default)
+            .ReturnsForAnyArgs(new V1Deployment());
+        resources.EnsureDeploymentAsync(default!, default!, (string?)null!, default!, default, default)
             .ReturnsForAnyArgs(new V1Deployment());
         resources.EnsureServiceAsync(default!, default!, default!, default)
             .ReturnsForAnyArgs(new V1Service());

@@ -165,7 +165,8 @@ public sealed class Phase6BAuthWiringTests
                 if (name.EndsWith("auth-proxy-cm", StringComparison.Ordinal)) authProxyConfig = data;
                 return new V1ConfigMap();
             });
-        resources.EnsureDeploymentAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<V1PodSpec>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        // Hosted reconciler uses the per-component hash dict overload (not the legacy string one).
+        resources.EnsureDeploymentAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<IReadOnlyDictionary<string, string>>(), Arg.Any<V1PodSpec>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 capturedPodSpec = ci.ArgAt<V1PodSpec>(3);
