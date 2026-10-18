@@ -239,7 +239,7 @@ public sealed class ProxyRepositoryReconciler(
         var deployName = $"{name}-nginx";
         var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy, uploadNeedsHtpasswd);
 
-        await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, replicas: 1, ct);
+        await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, spec.Replicas ?? 1, ct, topologySpreadConstraint: spec.TopologySpreadConstraint);
 
         // 5 ── Service ─────────────────────────────────────────────────────────
         var servicePorts = BuildServicePorts(spec.Metrics);
