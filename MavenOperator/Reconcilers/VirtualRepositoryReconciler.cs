@@ -179,7 +179,8 @@ public sealed class VirtualRepositoryReconciler(
 
         var deploymentName = $"{name}-nginx";
         await resources.EnsureDeploymentAsync(entity, deploymentName, componentHashes,
-            BuildVirtualPodSpec(name, spec), replicas: 1, ct);
+            BuildVirtualPodSpec(name, spec), spec.Replicas ?? 1, ct,
+            topologySpreadConstraint: spec.TopologySpreadConstraint);
 
         // 6 ── C# proxy status Service (:8080 → proxy sidecar) ──────────────────
         // Exposes the upload-status endpoint for operator polling (status.upload).
