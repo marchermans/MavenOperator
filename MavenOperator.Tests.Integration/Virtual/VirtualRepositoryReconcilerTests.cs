@@ -14,8 +14,9 @@ namespace MavenOperator.Tests.Integration.Virtual;
 /// Integration tests for VirtualRepositoryReconciler against a real Kubernetes API.
 ///
 /// These tests validate that the reconciler creates/updates all expected child resources:
-/// download-htpasswd Secret, proxy ConfigMap, proxy Deployment, proxy Service,
-/// NGINX ConfigMap, NGINX Deployment, and external Service.
+/// download-htpasswd Secret, proxy ConfigMap, NGINX ConfigMap, single merged
+/// Deployment (nginx main container + C# proxy sidecar), proxy status Service,
+/// and external Service.
 ///
 /// Run with: INTEGRATION_TESTS=true dotnet test --filter Category=Integration
 /// </summary>
@@ -206,21 +207,70 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
     // ── Proxy and NGINX Deployments ───────────────────────────────────────────
 
     [IntegrationFact]
-    public async Task Reconcile_CreatesProxyDeployment()
+    public async Task Reconcile_CreatesSingleMergedDeployment_WithNginxAndProxySidecar()
     {
         var name   = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}";
         var entity = await BuildEntityAsync(name, members: ["releases"]);
 
         await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
 
+        // Exactly one deployment: nginx (main) + proxy (sidecar), hosted-repo pattern.
         var deploy = await cluster.Client.GetAsync<V1Deployment>(
-            $"{name}-proxy", cluster.Namespace, CancellationToken.None);
+            $"{name}-nginx", cluster.Namespace, CancellationToken.None);
 
         deploy.ShouldNotBeNull();
-        var proxy = deploy.Spec!.Template.Spec!.Containers!.Single(c => c.Name == "proxy");
+        var containers = deploy.Spec!.Template.Spec!.Containers!;
+        containers.Count.ShouldBe(2);
+
+        var proxy = containers.Single(c => c.Name == "proxy");
         var expectedImage = Environment.GetEnvironmentVariable("VIRTUAL_PROXY_IMAGE")
             ?? "ghcr.io/marchermans/maven-virtual-proxy:0.3.0-pre.1";
         proxy.Image.ShouldBe(expectedImage);
+
+        // Per-component hash annotations on the pod template (same pattern as hosted repos).
+        var podAnnotations = deploy.Spec!.Template.Metadata.Annotations!;
+        podAnnotations["maven.operator.io/nginx-hash"].ShouldMatch("^[0-9a-f]{16}$");
+        podAnnotations["maven.operator.io/proxy-config-hash"].ShouldMatch("^[0-9a-f]{16}$");
+
+        // The legacy standalone proxy Deployment must not be created.
+        var legacy = await cluster.Client.GetAsync<V1Deployment>(
+            $"{name}-proxy", cluster.Namespace, CancellationToken.None);
+        legacy.ShouldBeNull();
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_DeletesLegacyProxyDeployment_OnMigration()
+    {
+        var name   = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"]);
+
+        // Simulate a pre-consolidation repo: the standalone proxy Deployment exists.
+        var legacyDeploy = new V1Deployment
+        {
+            Metadata = new V1ObjectMeta { Name = $"{name}-proxy", NamespaceProperty = cluster.Namespace },
+            Spec     = new V1DeploymentSpec
+            {
+                Replicas = 0,
+                Selector = new V1LabelSelector { MatchLabels = new Dictionary<string, string> { ["app"] = $"{name}-proxy" } },
+                Template = new V1PodTemplateSpec
+                {
+                    Metadata = new V1ObjectMeta { Labels = new Dictionary<string, string> { ["app"] = $"{name}-proxy" } },
+                    Spec     = new V1PodSpec { Containers = [new V1Container { Name = "legacy-proxy", Image = "nginx:alpine" }] },
+                },
+            },
+        };
+        await cluster.Client.CreateAsync(legacyDeploy, CancellationToken.None);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        // The obsolete standalone Deployment is deleted one-shot; the merged one exists.
+        var legacy   = await cluster.Client.GetAsync<V1Deployment>(
+            $"{name}-proxy", cluster.Namespace, CancellationToken.None);
+        var merged   = await cluster.Client.GetAsync<V1Deployment>(
+            $"{name}-nginx", cluster.Namespace, CancellationToken.None);
+
+        legacy.ShouldBeNull();
+        merged.ShouldNotBeNull();
     }
 
     [IntegrationFact]
@@ -352,8 +402,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
         var nginxCm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-nginx-cm", ns, ct);
         AssertOwned(nginxCm?.Metadata.OwnerReferences, "nginx ConfigMap");
 
-        var proxyDeploy = await cluster.Client.GetAsync<V1Deployment>($"{name}-proxy", ns, ct);
-        AssertOwned(proxyDeploy?.Metadata.OwnerReferences, "proxy Deployment");
+
 
         var nginxDeploy = await cluster.Client.GetAsync<V1Deployment>($"{name}-nginx", ns, ct);
         AssertOwned(nginxDeploy?.Metadata.OwnerReferences, "nginx Deployment");

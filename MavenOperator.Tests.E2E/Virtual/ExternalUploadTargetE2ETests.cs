@@ -178,9 +178,10 @@ public sealed class ExternalUploadTargetE2EFixture : IAsyncLifetime
 
             // ── Virtual repo with fan-out to BOTH targets ──────────────────────
             var virtUploadSecret = $"{VirtName}-shared-upload";
+            // The shared helper waits until ALL containers (nginx + C# proxy sidecar)
+            // report Ready — no separate proxy readiness wait needed anymore.
             await CreateVirtualRepositoryAsync(VirtName, [ProdName, ProxyName], rsUpstreamSecret, virtUploadSecret);
             await PodReadinessHelper.WaitForNginxReadyAsync(_client, OperatorNamespace, VirtName);
-            await WaitForProxySvcReadyAsync(VirtName);
 
             // Port-forward the virtual nginx svc for client-side assertions.
             var (port, _) = await PortForwardServiceAsync($"{VirtName}-svc", 80);
@@ -489,40 +490,6 @@ public sealed class ExternalUploadTargetE2EFixture : IAsyncLifetime
             await Task.Delay(2_000);
         }
         throw new TimeoutException($"Pod(s) '{labelSelector}' in '{OperatorNamespace}' not Ready within {timeoutSeconds}s.");
-    }
-
-    private async Task WaitForProxySvcReadyAsync(string repoName)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                if (await _client.GetAsync<V1Service>($"{repoName}-proxy-svc", OperatorNamespace, CancellationToken.None) is not null)
-                    break;
-            }
-            catch { /* wait for reconcile */ }
-            await Task.Delay(1_000);
-        }
-
-        var pods = await _client.ListAsync<V1Pod>(OperatorNamespace,
-            labelSelector: $"app={repoName}-proxy", cancellationToken: CancellationToken.None);
-        if (pods.Any(p => p.Status?.Phase == "Running"
-                          && p.Status.ContainerStatuses is { Count: > 0 } cs && cs.All(c => c.Ready)))
-            return;
-
-        // Fall back to a short grace poll — reconcile may not have created the pod yet.
-        var podDeadline = DateTime.UtcNow.AddSeconds(180);
-        while (DateTime.UtcNow < podDeadline)
-        {
-            pods = await _client.ListAsync<V1Pod>(OperatorNamespace,
-                labelSelector: $"app={repoName}-proxy", cancellationToken: CancellationToken.None);
-            if (pods.Any(p => p.Status?.Phase == "Running"
-                             && p.Status.ContainerStatuses is { Count: > 0 } cs && cs.All(c => c.Ready)))
-                return;
-            await Task.Delay(1_000);
-        }
-        throw new TimeoutException($"Virtual proxy pod for '{repoName}' did not become Ready.");
     }
 
     /// <summary>

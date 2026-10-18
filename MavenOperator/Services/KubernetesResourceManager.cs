@@ -570,9 +570,15 @@ public sealed class KubernetesResourceManager(
                             string.Equals(dp.Name, ep.Name, StringComparison.Ordinal) &&
                             string.Equals(dp.TargetPort?.ToString(), ep.TargetPort?.ToString(), StringComparison.Ordinal)));
 
-                if (portsMatch)
+                // The selector may have drifted even when ports match (e.g. a service retargeted at a
+                // merged/renamed deployment — the Virtual repo proxy-svc migration does exactly this).
+                var selectorMatch = existing.Spec?.Selector is { Count: 1 } sel
+                    && sel.TryGetValue("app", out var app)
+                    && string.Equals(app, selectorAppLabel, StringComparison.Ordinal);
+
+                if (portsMatch && selectorMatch)
                 {
-                    logger.LogDebug("Service {Namespace}/{Name} already exists with matching ports", ns, serviceName);
+                    logger.LogDebug("Service {Namespace}/{Name} already exists with matching ports and selector", ns, serviceName);
                     return existing;
                 }
 

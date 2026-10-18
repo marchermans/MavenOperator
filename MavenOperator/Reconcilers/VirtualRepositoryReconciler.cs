@@ -14,18 +14,18 @@ namespace MavenOperator.Reconcilers;
 /// Full Phase 3 implementation of the Virtual repository reconciler.
 ///
 /// Architecture per Virtual repo (all in the same namespace):
-///   nginx Deployment  ──► C# proxy Deployment  ──► member Services
+///   pod[nginx ──► C# proxy sidecar]  ──► member Services
 ///
 /// Steps (all idempotent):
 ///   1. Validate members list is non-empty
-///   2. EnsureDownloadHtpasswdSecret
-///   3. EnsureProxyConfigMap          (JSON member list for C# proxy)
-///   4. EnsureProxyDeployment         (operator image in proxy mode)
-///   5. EnsureProxyService            (ClusterIP for NGINX → proxy)
-///   6. EnsureNginxConfigMap          (auth + proxy_pass to C# proxy)
-///   7. EnsureNginxDeployment
-///   8. EnsureNginxService            (external ClusterIP)
-///   9. EnsureIngress (when enabled)
+///   2. EnsureDownloadHtpasswdSecret (+ upload htpasswd when fan-out enabled)
+///   3. EnsureProxyConfigMap          (JSON member/upload-target config for C# proxy)
+///   4. EnsureNginxConfigMap          (auth + proxy_pass to C# proxy sidecar over loopback)
+///   5. EnsureDeployment              ({name}-nginx: nginx main container + C# proxy sidecar,
+///                                     same pattern as hosted repos' auth-proxy/metadata-broker)
+///   6. EnsureProxyService            (:8080 — exposes upload-status for operator polling)
+///   7. EnsureNginxService            (external ClusterIP, :80 → nginx container)
+///   8. EnsureIngress / Gateway API (when enabled)
 /// </summary>
 public sealed class VirtualRepositoryReconciler(
     IKubernetesClient k8s,
@@ -146,37 +146,41 @@ public sealed class VirtualRepositoryReconciler(
         await resources.EnsureConfigMapAsync(entity, $"{name}-proxy-cm",
             new Dictionary<string, string> { ["appsettings.json"] = proxyConfigJson }, ct);
 
-        // 4 ── C# proxy Deployment ─────────────────────────────────────────────
-        var proxyPodSpec  = BuildProxyPodSpec(name, spec);
-        var proxyHash     = ComputeHash(proxyConfigJson + downloadHtpasswd);
-        var proxyDeplName = $"{name}-proxy";
-
-        await resources.EnsureDeploymentAsync(entity, proxyDeplName, proxyHash, proxyPodSpec, replicas: 1, ct);
-
-        // 5 ── C# proxy internal Service ───────────────────────────────────────
-        await resources.EnsureServiceAsync(entity, $"{name}-proxy-svc", proxyDeplName, ProxyPort, ct);
-
-        // 6 ── NGINX ConfigMap (auth_basic front + proxy_pass to C# proxy) ─────
+        // 4 ── NGINX ConfigMap (auth_basic front + proxy_pass to C# proxy sidecar)
         var uploadPolicy = spec.Auth.Upload.Policy;
         var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, uploadPolicy, repositoryPathPrefix, uploadEnabled);
-        var nginxCmName   = $"{name}-nginx-cm";
 
-        await resources.EnsureConfigMapAsync(entity, nginxCmName,
+        await resources.EnsureConfigMapAsync(entity, $"{name}-nginx-cm",
             new Dictionary<string, string> { ["default.conf"] = nginxConfig }, ct);
 
-        // 7 ── NGINX Deployment ────────────────────────────────────────────────
+        // 5 ── Single merged Deployment: nginx (main) + C# proxy (sidecar) ───────
+        // Same pattern as hosted repos' auth-proxy / metadata-broker sidecars.
+        // Per-component hashes so config changes are observable per component;
+        // any change rolls the single deployment. k8s only routes traffic to the
+        // pod once ALL containers (nginx + proxy) are Ready, eliminating the
+        // startup window where nginx would answer 502 for an unready proxy.
         var uploadHtpasswdForHash = uploadEnabled ? await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct) : string.Empty;
-        var nginxHash     = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswdForHash);
-        var nginxPodSpec  = BuildNginxPodSpec(name, spec);
-        var nginxDeplName = $"{name}-nginx";
 
-        await resources.EnsureDeploymentAsync(entity, nginxDeplName, nginxHash, nginxPodSpec, replicas: 1, ct);
+        var componentHashes = new Dictionary<string, string>
+        {
+            ["nginx"]        = ComputeHash(nginxConfig + downloadHtpasswd + uploadHtpasswdForHash),
+            ["proxy-config"] = ComputeHash(proxyConfigJson),
+        };
 
-        // 8 ── External NGINX Service ──────────────────────────────────────────
-        await resources.EnsureServiceAsync(entity, $"{name}-svc", nginxDeplName, ct);
+        var deploymentName = $"{name}-nginx";
+        await resources.EnsureDeploymentAsync(entity, deploymentName, componentHashes,
+            BuildVirtualPodSpec(name, spec), replicas: 1, ct);
+
+        // 6 ── C# proxy status Service (:8080 → proxy sidecar) ──────────────────
+        // Exposes the upload-status endpoint for operator polling (status.upload).
+        // Data traffic never uses it — nginx reaches the proxy over loopback.
+        await resources.EnsureServiceAsync(entity, $"{name}-proxy-svc", deploymentName, ProxyPort, ct);
+
+        // 7 ── External NGINX Service (:80 → nginx container) ───────────────────
+        await resources.EnsureServiceAsync(entity, $"{name}-svc", deploymentName, ct);
 
         entity.Status.SetCondition("Available", isTrue: true,
-            reason: "DeploymentEnsured", message: "Virtual repo NGINX + proxy deployments ensured");
+            reason: "DeploymentEnsured", message: "Virtual repo deployment (NGINX + C# proxy sidecar) ensured");
 
         // 8b ── Upload status and target reachability probing ──────────────────
         if (uploadSpec.Targets.Count > 0)
@@ -284,6 +288,12 @@ public sealed class VirtualRepositoryReconciler(
         MavenRepositorySpec spec,
         CancellationToken ct)
     {
+        // ── One-shot migration from the pre-sidecar topology ─────────────────
+        // The C# proxy used to run as a standalone Deployment; it now lives in the
+        // {name}-nginx pod. Delete the leftover deployment — its pods are
+        // garbage-collected via owner references.
+        await resources.DeleteResourceIfExistsAsync<V1Deployment>($"{name}-proxy", ns, ct);
+
         // ── Ingress: delete if no longer enabled ──────────────────────────────
         if (!spec.Ingress.Enabled)
         {
@@ -408,13 +418,14 @@ public sealed class VirtualRepositoryReconciler(
 
                     {{downloadAuthBlock}}
 
-                    # Strip the repository path prefix before forwarding to the C# proxy.
-                    # The proxy expects bare artifact paths (e.g. "com/example/foo/1.0/foo-1.0.jar").
-                    # URI-form proxy_pass replaces the matched location prefix with "/" for ALL methods
-                    # (GET, PUT, DELETE, ...). We deliberately do NOT use `rewrite ... break;` here:
-                    # a limit_except block in the same location silently suppresses rewrites for the
-                    # unlisted methods (empirically verified), which corrupted upload fan-out paths.
-                    proxy_pass         http://{{name}}-proxy-svc:{{ProxyPort}}/;
+                    # Strip the repository path prefix before forwarding to the C# proxy sidecar
+                    # (loopback — same pod). The proxy expects bare artifact paths
+                    # (e.g. "com/example/foo/1.0/foo-1.0.jar"). URI-form proxy_pass replaces the
+                    # matched location prefix with "/" for ALL methods (GET, PUT, DELETE, ...).
+                    # We deliberately do NOT use `rewrite ... break;` here: a limit_except block in
+                    # the same location silently suppresses rewrites for the unlisted methods
+                    # (empirically verified), which corrupted upload fan-out paths.
+                    proxy_pass         http://127.0.0.1:{{ProxyPort}}/;
                     proxy_http_version 1.1;
                     proxy_set_header   Host $host;
                     proxy_set_header   X-Real-IP $remote_addr;
@@ -458,26 +469,62 @@ public sealed class VirtualRepositoryReconciler(
         return resolvedMembers;
     }
 
-    private static V1PodSpec BuildProxyPodSpec(string name, MavenRepositorySpec spec)
+    /// <summary>
+    /// Single pod for a Virtual repository: NGINX as the main container (carries
+    /// user-specified resources, same convention as hosted repos) plus the C#
+    /// aggregation proxy as a sidecar with fixed modest defaults.
+    /// The proxy binds 0.0.0.0 so {name}-proxy-svc can reach its upload-status
+    /// endpoint for operator polling; nginx reaches it over loopback only.
+    /// </summary>
+    private static V1PodSpec BuildVirtualPodSpec(string name, MavenRepositorySpec spec)
     {
         var res = BuildResources(spec);
+        bool uploadEnabled = spec.Virtual?.Upload?.Targets.Count > 0;
 
         return new V1PodSpec
         {
             Containers =
             [
+                // NGINX — main container (carries user-specified resources).
+                new V1Container
+                {
+                    Name            = "nginx",
+                    Image           = NginxImage,
+                    ImagePullPolicy = "IfNotPresent",
+                    Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
+                    Resources       = res,
+                    VolumeMounts    = BuildNginxVolumeMounts(uploadEnabled),
+                    LivenessProbe   = new V1Probe
+                    {
+                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
+                        InitialDelaySeconds = 5,
+                        PeriodSeconds       = 15,
+                    },
+                    ReadinessProbe  = new V1Probe
+                    {
+                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
+                        InitialDelaySeconds = 3,
+                        PeriodSeconds       = 10,
+                    },
+                },
+                // C# aggregation proxy sidecar (metadata merging + upload fan-out).
                 new V1Container
                 {
                     Name            = "proxy",
                     Image           = ProxyImage,
                     ImagePullPolicy = "IfNotPresent",
                     Ports           = [new V1ContainerPort { ContainerPort = ProxyPort, Name = "http" }],
-                    Resources       = res,
-                    Env =
+                    // Fixed modest budget — spec.resources applies to nginx only.
+                    Resources       = new V1ResourceRequirements
+                    {
+                        Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("64Mi")  },
+                        Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },
+                    },
+                    Env             =
                     [
                         new V1EnvVar { Name = "ASPNETCORE_URLS", Value = $"http://+:{ProxyPort}" },
                     ],
-                    VolumeMounts =
+                    VolumeMounts    =
                     [
                         new V1VolumeMount
                         {
@@ -486,13 +533,13 @@ public sealed class VirtualRepositoryReconciler(
                             ReadOnlyProperty = true,
                         },
                     ],
-                    LivenessProbe = new V1Probe
+                    LivenessProbe   = new V1Probe
                     {
                         HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
                         InitialDelaySeconds = 5,
                         PeriodSeconds       = 15,
                     },
-                    ReadinessProbe = new V1Probe
+                    ReadinessProbe  = new V1Probe
                     {
                         HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
                         InitialDelaySeconds = 3,
@@ -502,47 +549,9 @@ public sealed class VirtualRepositoryReconciler(
             ],
             Volumes =
             [
-                new V1Volume
-                {
-                    Name      = "proxy-config",
-                    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-proxy-cm" },
-                },
+                ..BuildNginxVolumes(name),
+                new() { Name = "proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-proxy-cm" } },
             ],
-        };
-    }
-
-    private static V1PodSpec BuildNginxPodSpec(string name, MavenRepositorySpec spec)
-    {
-        var res = BuildResources(spec);
-        bool uploadEnabled = spec.Virtual?.Upload?.Targets.Count > 0;
-
-        return new V1PodSpec
-        {
-            Containers =
-            [
-                new V1Container
-                {
-                    Name            = "nginx",
-                    Image           = NginxImage,
-                    ImagePullPolicy = "IfNotPresent",
-                    Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
-                    Resources       = res,
-                    VolumeMounts    = BuildNginxVolumeMounts(uploadEnabled),
-                    LivenessProbe = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 5,
-                        PeriodSeconds       = 15,
-                    },
-                    ReadinessProbe = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 3,
-                        PeriodSeconds       = 10,
-                    },
-                },
-            ],
-            Volumes = BuildNginxVolumes(name),
         };
     }
 

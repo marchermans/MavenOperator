@@ -83,9 +83,10 @@ public sealed class UploadE2EFixture : IAsyncLifetime
         // Create the Virtual repository with upload fan-out enabled
         await CreateVirtualWithUploadsAsync(VirtualName, [Target1Name, Target2Name]);
 
-        // Wait for the Virtual NGINX to be ready
+        // Wait for the Virtual repo pod to be ready — the shared helper waits until ALL
+        // containers (nginx + C# proxy sidecar) report Ready, so there is no window where
+        // NGINX answers 502s for an unready upstream proxy.
         await WaitForNginxReadyAsync(VirtualName);
-        await WaitForProxyReadyAsync(VirtualName);
 
         var baseUrl  = await ResolveBaseUrlAsync($"{VirtualName}-svc");
         HttpClient   = new HttpClient
@@ -268,46 +269,6 @@ public sealed class UploadE2EFixture : IAsyncLifetime
     {
         await PodReadinessHelper.WaitForNginxReadyAsync(
             Client, OperatorNamespace, repoName);
-    }
-
-    private async Task WaitForProxyReadyAsync(string repoName)
-    {
-        var serviceName = $"{repoName}-proxy-svc";
-        var serviceDeadline = DateTime.UtcNow.AddSeconds(120);
-        while (DateTime.UtcNow < serviceDeadline)
-        {
-            try
-            {
-                var service = await Client.GetAsync<V1Service>(serviceName, OperatorNamespace, CancellationToken.None);
-                if (service is not null)
-                    break;
-            }
-            catch { /* wait for reconcile */ }
-
-            await Task.Delay(1000);
-        }
-
-        var labelSelector = $"app={repoName}-proxy";
-        var podDeadline = DateTime.UtcNow.AddSeconds(180);
-        while (DateTime.UtcNow < podDeadline)
-        {
-            var pods = await Client.ListAsync<V1Pod>(OperatorNamespace,
-                labelSelector: labelSelector,
-                cancellationToken: CancellationToken.None);
-
-            var ready = pods.Any(p =>
-                p.Status?.Phase == "Running" &&
-                p.Status.ContainerStatuses is { Count: > 0 } statuses &&
-                statuses.All(cs => cs.Ready));
-
-            if (ready)
-                return;
-
-            await Task.Delay(1000);
-        }
-
-        throw new TimeoutException(
-            $"Virtual proxy pod for '{repoName}' did not become Ready in namespace '{OperatorNamespace}'.");
     }
 
     private async Task<string> ResolveBaseUrlAsync(string svcName)
