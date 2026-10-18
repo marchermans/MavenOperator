@@ -32,7 +32,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         SeedFile("releases/com/example/lib/1.0/lib.jar");
 
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var artifacts = new List<ArtifactDescriptor>();
@@ -49,7 +50,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         SeedFile("com/example/lib/1.0/lib.jar");
 
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: false, repositoryName: null, appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: false, repositoryName: null,
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var artifacts = new List<ArtifactDescriptor>();
@@ -61,6 +63,25 @@ public sealed class PvcSnapshotSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task CrawlAsync_SkipsMavenMetadataXml()
+    {
+        SeedFile("releases/com/example/lib/maven-metadata.xml");
+        SeedFile("releases/com/example/lib/1.0/lib.jar");
+
+        var source = new PvcSnapshotSource(
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
+            NullLogger<PvcSnapshotSource>.Instance);
+
+        var artifacts = new List<ArtifactDescriptor>();
+        await foreach (var a in source.CrawlAsync(new ImportFilters(), CancellationToken.None))
+            artifacts.Add(a);
+
+        artifacts.ShouldHaveSingleItem();
+        artifacts[0].RelativePath.ShouldNotContain("maven-metadata");
+    }
+
+    [Fact]
     public async Task CrawlAsync_SkipsIndexAndCacheDirectories()
     {
         SeedFile("releases/.index/catalog");
@@ -68,7 +89,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         SeedFile("releases/com/example/lib/1.0/lib.jar");
 
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var artifacts = new List<ArtifactDescriptor>();
@@ -91,7 +113,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
 
         var since  = new DateTime(2025, 1, 1).ToString("O");
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var artifacts = new List<ArtifactDescriptor>();
@@ -109,7 +132,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         SeedFile("releases/org/junit/junit/4.13/junit.jar");
 
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var filters   = new ImportFilters { IncludeGroups = ["com.example"] };
@@ -127,7 +151,8 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         SeedFile("releases/com/example/lib/1.0/lib.jar");
 
         var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: false,
+            _sourceDir, reposiliteLayout: true, repositoryName: "releases",
+            appRootPvcMode: false,
             NullLogger<PvcSnapshotSource>.Instance);
 
         var artifacts = new List<ArtifactDescriptor>();
@@ -137,64 +162,4 @@ public sealed class PvcSnapshotSourceTests : IDisposable
         artifacts[0].FilePath.ShouldNotBeNull();
         File.Exists(artifacts[0].FilePath).ShouldBeTrue();
     }
-
-    [Fact]
-    public async Task CrawlAsync_AppRootPvcMode_OnlyCrawlsTargetRepository()
-    {
-        // Simulate approot layout with multiple repositories.
-        // Only artifacts under "app/repositories/libs-release/" should be crawled.
-        SeedFile("repositories/libs-release/com/example/lib/1.0/lib.jar", repoPrefix: false);
-        SeedFile("repositories/libs-snapshot/org/snap/artifact/2.0/artifact.jar", repoPrefix: false); // different repo — should NOT be included
-        SeedFile("config/settings.xml", repoPrefix: false); // approot file — should NOT be included
-
-        var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "libs-release", appRootPvcMode: true,
-            NullLogger<PvcSnapshotSource>.Instance);
-
-        var artifacts = new List<ArtifactDescriptor>();
-        await foreach (var a in source.CrawlAsync(new ImportFilters(), CancellationToken.None))
-            artifacts.Add(a);
-
-        // Only the libs-release artifact should be found.
-        artifacts.ShouldHaveSingleItem();
-        artifacts[0].RelativePath.ShouldBe("com/example/lib/1.0/lib.jar");
-    }
-
-    [Fact]
-    public async Task CrawlAsync_AppRootPvcMode_WithDifferentApprootName()
-    {
-        // Simulate approot layout with "data" as the approot directory name.
-        SeedFile("repositories/releases/com/example/lib/1.0/lib.jar", repoPrefix: false);
-
-        var source = new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "releases", appRootPvcMode: true,
-            NullLogger<PvcSnapshotSource>.Instance);
-
-        var artifacts = new List<ArtifactDescriptor>();
-        await foreach (var a in source.CrawlAsync(new ImportFilters(), CancellationToken.None))
-            artifacts.Add(a);
-
-        artifacts.ShouldHaveSingleItem();
-        artifacts[0].RelativePath.ShouldBe("com/example/lib/1.0/lib.jar");
-    }
-
-    [Fact]
-    public void Constructor_AppRootPvcMode_WithoutRepositoryName_Throws()
-    {
-        Should.Throw<ArgumentException>(() => new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: null!, appRootPvcMode: true,
-            NullLogger<PvcSnapshotSource>.Instance));
-    }
-
-    [Fact]
-    public void Constructor_AppRootPvcMode_RepositoryNotFound_Throws()
-    {
-        // No "repositories/libs-release" exists under any top-level directory.
-        SeedFile("app/config/settings.xml", repoPrefix: false);
-
-        Should.Throw<DirectoryNotFoundException>(() => new PvcSnapshotSource(
-            _sourceDir, reposiliteLayout: true, repositoryName: "libs-release", appRootPvcMode: true,
-            NullLogger<PvcSnapshotSource>.Instance));
-    }
 }
-

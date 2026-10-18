@@ -476,6 +476,7 @@ public sealed class KubernetesResourceManager(
                     foreach (var key in ann.Where(a => IsManagedHashAnnotation(a.Key) && !desiredAnnotations.ContainsKey(a.Key)).Select(a => a.Key).ToList())
                         ann.Remove(key);
                     existing.Spec.Template.Spec = podSpec;
+                    existing.Spec.Replicas = replicas;
 
                     // Inject TopologySpreadConstraint if configured.
                     if (topologySpreadConstraint is not null)

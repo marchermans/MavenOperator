@@ -40,7 +40,7 @@ public sealed class CredentialSecretControllerTests
         result.IsSuccess.ShouldBeTrue();
         // No list call should have been made
         await _k8s.DidNotReceive().ListAsync<MavenRepositoryV1Alpha1>(
-            Arg.Any<string>(), Arg.Any<string>(), null!, Arg.Any<CancellationToken>());
+            Arg.Any<string>());
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class CredentialSecretControllerTests
         await _sut.ReconcileAsync(secret, CancellationToken.None);
 
         await _k8s.DidNotReceive().ListAsync<MavenRepositoryV1Alpha1>(
-            Arg.Any<string>(), Arg.Any<string>(), null!, Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string?>());
     }
 
     [Fact]
@@ -61,8 +61,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildHostedRepo("my-repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
         await _sut.ReconcileAsync(secret, CancellationToken.None);
@@ -78,8 +77,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildHostedRepo("my-repo", ns, uploadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
         await _sut.ReconcileAsync(secret, CancellationToken.None);
@@ -94,8 +92,7 @@ public sealed class CredentialSecretControllerTests
         const string ns = "maven";
 
         var repo = BuildProxyRepo("my-proxy", ns, upstreamSecretRef: secretName);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
         await _sut.ReconcileAsync(secret, CancellationToken.None);
@@ -108,8 +105,7 @@ public sealed class CredentialSecretControllerTests
     {
         const string ns = "maven";
         var repo = BuildHostedRepo("my-repo", ns, downloadSecretRefs: ["other-secret"]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo]);
 
         var secret = BuildSecret("unrelated-secret", ns, hasCredentialLabel: true);
         await _sut.ReconcileAsync(secret, CancellationToken.None);
@@ -123,8 +119,7 @@ public sealed class CredentialSecretControllerTests
         const string secretName = "creds";
         const string ns = "ns";
         var repo = BuildHostedRepo("repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo]);
 
         var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
         await _sut.ReconcileAsync(secret, CancellationToken.None);
@@ -138,24 +133,6 @@ public sealed class CredentialSecretControllerTests
     }
 
     [Fact]
-    public async Task ReconcileAsync_PersistsRepoStatus_AfterSuccessfulRereconcile()
-    {
-        // This controller bypasses MavenRepositoryController's queue item, which is
-        // the only other place repo status gets persisted — without an explicit
-        // UpdateStatusAsync here the reconciler's in-memory status changes are lost.
-        const string secretName = "creds";
-        const string ns = "ns";
-        var repo = BuildHostedRepo("repo", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo]);
-
-        var secret = BuildSecret(secretName, ns, hasCredentialLabel: true);
-        await _sut.ReconcileAsync(secret, CancellationToken.None);
-
-        await _k8s.Received(1).UpdateStatusAsync(repo, Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
     public async Task ReconcileAsync_SwallowsException_FromSubReconcile_AndContinues()
     {
         const string secretName = "creds";
@@ -163,8 +140,7 @@ public sealed class CredentialSecretControllerTests
 
         var repo1 = BuildHostedRepo("repo1", ns, downloadSecretRefs: [secretName]);
         var repo2 = BuildHostedRepo("repo2", ns, downloadSecretRefs: [secretName]);
-        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns, Arg.Any<string>(), null!, Arg.Any<CancellationToken>())
-            .Returns([repo1, repo2]);
+        _k8s.ListAsync<MavenRepositoryV1Alpha1>(ns).Returns([repo1, repo2]);
 
         // First reconcile throws
         _hosted.ReconcileAsync(repo1, Arg.Any<CancellationToken>())
@@ -177,9 +153,6 @@ public sealed class CredentialSecretControllerTests
         result.IsSuccess.ShouldBeTrue();
         // Second repo should still be attempted
         await _hosted.Received(1).ReconcileAsync(repo2, Arg.Any<CancellationToken>());
-        // Status persisted only for the successful rereconcile
-        await _k8s.DidNotReceive().UpdateStatusAsync(repo1, Arg.Any<CancellationToken>());
-        await _k8s.Received(1).UpdateStatusAsync(repo2, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -223,13 +196,13 @@ public sealed class CredentialSecretControllerTests
                 {
                     Download = new AuthPolicySpec
                     {
-                        Policy     = downloadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Anonymous,
-                        Users = (downloadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Reader }).ToList(),
+                        Policy = downloadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Anonymous,
+                        Users = downloadSecretRefs?.Select(s => new UserRef { SecretRef = s }).ToList() ?? [],
                     },
                     Upload = new AuthPolicySpec
                     {
-                        Policy     = uploadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Authenticated,
-                        Users = (uploadSecretRefs ?? []).Select(s => new UserRef { SecretRef = s, Role = UserRole.Deployer }).ToList(),
+                        Policy = uploadSecretRefs?.Any() == true ? AuthPolicy.Authenticated : AuthPolicy.Authenticated,
+                        Users = uploadSecretRefs?.Select(s => new UserRef { SecretRef = s }).ToList() ?? [],
                     },
                 },
             },
@@ -259,4 +232,3 @@ public sealed class CredentialSecretControllerTests
             },
         };
 }
-

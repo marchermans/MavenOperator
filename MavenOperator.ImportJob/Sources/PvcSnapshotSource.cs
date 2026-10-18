@@ -20,6 +20,7 @@ public sealed class PvcSnapshotSource : IRepositorySource
     private readonly ILogger<PvcSnapshotSource> _logger;
 
     private static readonly string[] SkipDirectories = [".index", ".cache", ".git"];
+    private static readonly string[] SkipFileSuffixes  = ["maven-metadata.xml"];
 
     public PvcSnapshotSource(
         string mountPath,
@@ -93,6 +94,11 @@ public sealed class PvcSnapshotSource : IRepositorySource
             var relativeFull = Path.GetRelativePath(_crawlRoot, filePath);
             if (relativeFull.Split(Path.DirectorySeparatorChar)
                     .Any(seg => SkipDirectories.Any(d => seg == d)))
+                continue;
+
+            // Skip maven-metadata.xml files (already published by metadata broker)
+            var fileName = Path.GetFileName(filePath);
+            if (SkipFileSuffixes.Any(suffix => fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
                 continue;
 
             // Build Maven-standard relative path

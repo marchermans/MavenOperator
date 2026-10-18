@@ -29,7 +29,8 @@ public sealed class Phase4ReconcilerHardeningTests
         var nginx = new NginxConfigRenderer();
 
         var reconciler = new ProxyRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), nginx, events,
+            k8s, resources, new HtpasswdService(), Substitute.For<IRoleBasedHtpasswdService>(),
+            Substitute.For<IAuthProxyConfigRenderer>(), nginx, events,
             NullLogger<ProxyRepositoryReconciler>.Instance);
 
         var entity = BuildProxyEntity("proxy-repo", "ns", cachePvcSize: null);
@@ -62,8 +63,8 @@ public sealed class Phase4ReconcilerHardeningTests
 
         // emptyDir path: no PVC should be requested
         await resources.DidNotReceive().EnsurePvcAsync(
-            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
 
         // CacheReady condition should be set with EmptyDirCache reason
         var cacheCondition = entity.Status.Conditions.FirstOrDefault(c => c.Type == "CacheReady");
@@ -81,15 +82,15 @@ public sealed class Phase4ReconcilerHardeningTests
         var nginx     = new NginxConfigRenderer();
 
         var reconciler = new ProxyRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), nginx, events,
+            k8s, resources, new HtpasswdService(), Substitute.For<IRoleBasedHtpasswdService>(),
+            Substitute.For<IAuthProxyConfigRenderer>(), nginx, events,
             NullLogger<ProxyRepositoryReconciler>.Instance);
 
         const string cacheSize = "5Gi";
         var entity = BuildProxyEntity("proxy-repo", "ns", cachePvcSize: cacheSize);
 
         resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), 
-            Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(new k8s.Models.V1PersistentVolumeClaim());
         resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
             Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
@@ -114,8 +115,8 @@ public sealed class Phase4ReconcilerHardeningTests
             entity,
             $"proxy-repo-cache-pvc",
             cacheSize,
-            Arg.Is<string>(mode => mode == "ReadWriteMany"),
-            Arg.Is<string?>(sc => sc == null),
+            "ReadWriteMany",
+            null,
             true /* setOwnerReference */,
             Arg.Any<CancellationToken>());
 
@@ -135,7 +136,8 @@ public sealed class Phase4ReconcilerHardeningTests
         var events    = Substitute.For<IKubernetesEventService>();
 
         var reconciler = new HostedRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), new RoleBasedHtpasswdService(new HtpasswdService()), new AuthProxyConfigRenderer(), new NginxConfigRenderer(), events,
+            k8s, resources, new HtpasswdService(), Substitute.For<IRoleBasedHtpasswdService>(),
+            Substitute.For<IAuthProxyConfigRenderer>(), new NginxConfigRenderer(), events,
             NullLogger<HostedRepositoryReconciler>.Instance);
 
         var entity = BuildHostedEntity("my-repo", "ns", ingressEnabled: false);
@@ -217,4 +219,3 @@ public sealed class Phase4ReconcilerHardeningTests
             .Returns(Task.FromResult(false));
     }
 }
-
