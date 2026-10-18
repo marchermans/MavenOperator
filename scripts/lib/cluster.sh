@@ -161,14 +161,14 @@ cluster_preload_sidecar_images() {
 
   log_section "Pre-loading sidecar images"
 
+  # Track failures — we accumulate them to report all at once, then fail.
+  local _failed_count=0
+  local -a _failed_images=()
+
   for img in "${SIDECAR_IMAGES[@]}"; do
     # For k3d: check the server node's containerd directly.
     # For container: pre-load images into the cluster.
     # For external: skip (pods will pull from registry).
-    #
-    # IMPORTANT: this function MUST never fail under 'set -euo pipefail'.
-    # All individual steps are wrapped in '|| true' or 'if' blocks so that
-    # a missing image or unresponsive node does NOT abort the script.
 
     if [[ "${CLUSTER_TYPE}" == "k3d" ]]; then
       local _server_node="k3d-${K3D_CLUSTER_NAME}-server-0"
@@ -177,31 +177,31 @@ cluster_preload_sidecar_images() {
       local _short_tag="${_short##*:}"
 
       # Check whether the image is already in containerd (skip re-import).
-      # Guard the pipeline result so pipefail cannot cause early exit.
+      # Use a variable to capture pipeline result so pipefail doesn't abort.
       local _in_containerd=false
-      if docker exec "${_server_node}" crictl images 2>/dev/null \
+      docker exec "${_server_node}" crictl images 2>/dev/null \
           | awk -v name="${_short_name}" -v tag="${_short_tag}" \
-              '$1 ~ name && $2 == tag { found=1 } END { exit !found }' 2>/dev/null; then
-        _in_containerd=true
-      fi
+              '$1 ~ name && $2 == tag { found=1 } END { exit !found }' 2>/dev/null \
+          && _in_containerd=true || true
       if [[ "$_in_containerd" == "true" ]]; then
         log_info "  ${img} already in containerd — skipping."
         continue
       fi
     elif [[ "${CLUSTER_TYPE}" == "container" ]]; then
       log_step "Pulling and pre-loading '${img}' into cluster…"
-      # Wrap in '|| true' so a failed pull does not abort the script.
-      if container image pull "${img}" 2>&1 | grep -q 'Unpacking' 2>/dev/null || true; then
-        # Load with the exact reference (including registry/path).
+      if container image pull "${img}" 2>&1 | grep -q 'Unpacking'; then
         if container k8s load-image --name "${K3D_CLUSTER_NAME}" "${img}" 2>&1 \
-            | grep -q 'Importing' 2>/dev/null; then
+            | grep -q 'Importing'; then
           log_ok "  ${img} pre-loaded successfully."
+          continue
         else
-          log_warn "  Failed to load '${img}' — pods will pull on first use."
+          log_error "  Failed to load '${img}' — containerd import step failed."
         fi
       else
-        log_warn "  Could not pull '${img}' — sidecar pods may pull from internet."
+        log_error "  Could not pull '${img}' — container registry unreachable."
       fi
+      _failed_count=$((_failed_count + 1))
+      _failed_images+=("${img}")
       continue
     else
       log_info "  ${img} — will be pulled by pods from registry (no containerd pre-load for ${CLUSTER_TYPE})."
@@ -209,18 +209,35 @@ cluster_preload_sidecar_images() {
     fi
 
     log_step "Pulling and importing '${img}'…"
-    # Wrap the pull in '|| true' so network failures don't abort the script.
-    if "${CONTAINER_RUNTIME}" pull "${img}" 2>/dev/null || true; then
-      # Import into k3d — use '|| true' so import failures don't abort.
-      "${CONTAINER_RUNTIME}" save -o - "${img}" 2>/dev/null \
-        | k3d image import -c "${K3D_CLUSTER_NAME}" 2>/dev/null \
-        || log_warn "  Could not import '${img}' — pods will pull on first use."
-      log_ok "  ${img} pulled and imported."
-    else
-      log_warn "  Could not pull '${img}' — sidecar pods may pull from internet on first use."
+    # Attempt pull — fail the function (not just warn) if it doesn't work.
+    if ! "${CONTAINER_RUNTIME}" pull "${img}"; then
+      log_error "  Could not pull '${img}' from container registry."
+      _failed_count=$((_failed_count + 1))
+      _failed_images+=("${img}")
+      continue
     fi
+    # Import into k3d — fail the function (not just warn) if it doesn't work.
+    if ! "${CONTAINER_RUNTIME}" save -o - "${img}" \
+        | k3d image import -c "${K3D_CLUSTER_NAME}"; then
+      log_error "  Failed to import '${img}' into cluster containerd."
+      _failed_count=$((_failed_count + 1))
+      _failed_images+=("${img}")
+      continue
+    fi
+    log_ok "  ${img} pulled and imported."
   done
-  # Always exit 0 — failures are non-fatal for test execution.
+
+  # Report and fail if any sidecar image pre-loading failed.
+  if [[ "${_failed_count}" -gt 0 ]]; then
+    log_error "Failed to pre-load ${_failed_count} sidecar image(s):"
+    for img in "${_failed_images[@]}"; do
+      echo "  - ${img}"
+    done
+    echo
+    echo "These images are required for metrics sidecar integration tests."
+    echo "Verify the cluster has internet access and the registry is reachable."
+    return 1
+  fi
   return 0
 }
 
