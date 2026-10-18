@@ -154,9 +154,105 @@ By default, the automated runner uses `benchmark:benchmark` as comparison creden
 (it configures a temporary Reposilite token with the same pair). Override if needed:
 
 ```bash
-DOWNLOAD_USER=reader
-DOWNLOAD_PASS=secret
-./scripts/run-k6-comparison.sh
+# Unit tests only (no cluster needed) — fastest feedback loop
+./scripts/run-tests.sh unit
+
+# Unit + integration
+./scripts/run-tests.sh unit integration
+
+# Everything except k6 load tests (quick CI-equivalent)
+./scripts/run-tests.sh all --fast
+
+# Full suite including k6 load tests, then tear everything down
+./scripts/run-tests.sh all --cleanup
+
+# E2E against a pre-existing cluster (skip cluster creation)
+KUBECONFIG=~/.kube/my-cluster.yaml ./scripts/run-tests.sh e2e
+
+# k6 load tests only (requires a running cluster with the operator deployed)
+./scripts/run-tests.sh performance --perf-mode load
+```
+
+#### Prerequisites for cluster-based suites
+
+| Tool | Install |
+|------|---------|
+| k3d ≥ 5 | `curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh \| bash` |
+| kubectl | `https://kubernetes.io/docs/tasks/tools/` |
+| Docker | — |
+| Maven (E2E) | `sudo apt install maven` / `brew install maven` |
+| Gradle (E2E) | via Gradle wrapper in fixtures |
+| k6 (load) | `https://grafana.com/docs/k6/latest/set-up/install-k6/` |
+
+#### Running on Apple Silicon Macs with `container`
+
+On Apple Silicon MacBooks, you can run the same E2E integration tests using
+Apple's native **`container`** tool instead of k3d. The test scripts
+automatically detect which runtime is available.
+
+```bash
+# Install the container tool (requires Apple Silicon)
+# On GitHub Actions runners (macos-latest), it may be pre-installed.
+# Locally:
+brew tap apple/container-cli
+brew install apple-container
+
+# Run E2E tests — the script auto-detects 'container' and uses it
+./scripts/run-tests.sh e2e --cleanup
+```
+
+**How it works:** The `scripts/lib/runtime.sh` abstraction layer detects
+whether `k3d` or `container` is available, then routes cluster operations
+through the appropriate CLI. From the test code's perspective, both runtimes
+are transparent — the operator deploys, CRDs are applied, and tests run
+identically regardless of which Kubernetes engine powers the cluster.
+
+> **Note:** The CI workflow (`.github/workflows/ci.yaml`) includes a
+> parallel `e2e-macos` job that runs on GitHub's `macos-latest` runners
+> using the `container` tool. This keeps macOS testing on the critical path
+> alongside Linux (k3d) testing.
+
+### Releasing a new version
+
+Versioning is **fully automatic** — no `VERSION` file or manual bump needed.
+The CI `version` job uses [`paulhatch/semantic-version`](https://github.com/PaulHatch/semantic-version)
+to derive the next version from git tag history and conventional-commit messages.
+
+#### How the version is computed
+
+| Commit type | Effect |
+|-------------|--------|
+| `fix:`, `chore:`, etc. | patch bump (`1.0.0` → `1.0.1`) |
+| `feat:` or `feat(scope):` | minor bump (`1.0.0` → `1.1.0`) |
+| `feat!:`, `fix!:`, `BREAKING CHANGE:` | major bump (`1.0.0` → `2.0.0`) |
+
+**Untagged commits** produce a pre-release version: `1.2.3-pre.N`  
+(N = number of commits since the last tag).
+
+**Tagged commits** (`v1.2.3`) produce the clean release version: `1.2.3`.
+
+#### Shipping a release
+
+1. Write commits following [Conventional Commits](https://www.conventionalcommits.org/) — the type prefix determines which semver component is bumped.
+2. When ready to release, tag the commit and push:
+   ```bash
+   git tag v1.2.0
+   git push origin v1.2.0
+   ```
+3. CI will automatically:
+   - Compute version `1.2.0` (exact release — no `-pre.N` suffix).
+   - Run all tests.
+   - Build and push both Docker images tagged `1.2.0`, `1.2`, and `latest`.
+   - Stamp `version: "1.2.0"` and `appVersion: "1.2.0"` into `Chart.yaml`.
+   - Package and push the Helm chart to `oci://ghcr.io/marchermans/charts`.
+
+Snapshot builds on `main` receive the pre-release tag (e.g. `1.2.0-pre.4`)
+and are additionally tagged with the branch name (`main`).
+
+---
+
+## Architecture overview
+
 ```
 ---
 ## CI gates (thresholds)

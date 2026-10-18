@@ -256,12 +256,12 @@ jobs:
           name: integration-test-results
           path: "**/*.trx"
 
-  # ── E2E tests ───────────────────────────────────────────────────────────────
+  # ── E2E tests (Linux / k3d) ────────────────────────────────────────────────
   e2e:
-    name: E2E Tests
+    name: E2E Tests (Linux / k3d)
     runs-on: ubuntu-latest
     needs: docker-build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main/disabled' # Disabled for now!
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Re-enabled!
     permissions:
       contents: read
 
@@ -329,6 +329,105 @@ jobs:
         with:
           name: e2e-test-results
           path: "**/*.trx"
+
+  # ── E2E tests (macOS / Apple container) ──────────────────────────────────────
+  # Runs on Apple Silicon Macs using the native 'container' Kubernetes tool.
+  # This enables developers to run the same E2E tests on their MacBooks.
+  e2e-macos:
+    name: E2E Tests (macOS / Apple container)
+    runs-on: macos-latest
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Setup Java (Maven/Gradle toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Maven
+        run: brew install maven
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.0"
+
+      - name: Install Apple 'container' tool (if not pre-installed)
+        run: |
+          # GitHub macos-latest runners may have 'container' pre-installed.
+          # If not, the Homebrew tap provides it.
+          if ! command -v container &>/dev/null; then
+            brew tap apple/container-cli
+            brew install apple-container
+          fi
+          container --version
+
+      - name: Create and verify container k8s cluster
+        run: |
+          container k8s create --name maven-operator-test --cpus 2 --memory 4g
+          container k8s list
+
+      - name: Download pre-built Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: /tmp
+
+      - name: Build & load images into cluster
+        run: |
+          # Build images with container build (macOS native)
+          # Each image builds from the repo root; container handles
+          # architecture-specific builds automatically on Apple Silicon.
+          container build --no-cache -f MavenOperator/Dockerfile -t maven-operator:ci .
+          container k8s load-image --name maven-operator-test maven-operator:ci
+
+          container build --no-cache -f MavenOperator.VirtualProxy/Dockerfile -t maven-virtual-proxy:ci .
+          container k8s load-image --name maven-operator-test maven-virtual-proxy:ci
+
+          container build --no-cache -f MavenOperator.AuthProxy/Dockerfile -t maven-auth-proxy:ci .
+          container k8s load-image --name maven-operator-test maven-auth-proxy:ci
+
+          container build --no-cache -f MavenOperator.ImportJob/Dockerfile -t maven-import-job:ci .
+          container k8s load-image --name maven-operator-test maven-import-job:ci
+
+      - name: Run E2E tests
+        env:
+          OPERATOR_IMAGE: maven-operator:ci
+          VIRTUAL_PROXY_IMAGE: maven-virtual-proxy:ci
+          # Single-node cluster (no agents) — import tests need RWO PVC on same node
+          K3D_AGENTS: "0"
+          K3D_MAX_PODS: "250"
+        run: ./scripts/run-tests.sh e2e --cleanup
+
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-macos-test-results
+          path: "**/*.trx"
+
+      - name: Cleanup
+        if: always()
+        run: container k8s delete --name maven-operator-test 2>/dev/null || true
 
   # ── Performance tests (smoke + BenchmarkDotNet; k6 load is local-only) ──────
   performance:

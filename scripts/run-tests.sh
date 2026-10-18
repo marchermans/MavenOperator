@@ -148,8 +148,8 @@ done
 # Default to unit tests if nothing specified
 [[ ${#SUITES[@]} -eq 0 ]] && SUITES=(unit)
 
-# Deduplicate while preserving order
-mapfile -t SUITES < <(printf '%s\n' "${SUITES[@]}" | awk '!seen[$0]++')
+# Deduplicate while preserving order (bash 3.2 compatible — no mapfile).
+SUITES=($(printf '%s\n' "${SUITES[@]}" | awk '!seen[$0]++'))
 
 # ── Cleanup trap (only if cluster management is needed) ───────────────────────
 _needs_cluster() {
@@ -188,10 +188,18 @@ run_dotnet_test() {
   [[ -n "${OPT_FILTER}" ]] && filter_args=(--filter "${OPT_FILTER}")
 
   log_step "dotnet test ${project}  (${label})"
-  if env "${env_pairs[@]}" dotnet test "${REPO_ROOT}/${project}" \
-      --no-build \
-      --logger "console;verbosity=normal" \
-      "${filter_args[@]}"; then
+
+  # Build the command arguments array (bash 3.2 compatible).
+  local _test_args=()
+  if [[ ${#env_pairs[@]} -gt 0 ]]; then
+    _test_args+=(env "${env_pairs[@]}")
+  fi
+  _test_args+=(dotnet test "${REPO_ROOT}/${project}")
+  if [[ ${#OPT_FILTER} -gt 0 ]]; then
+    _test_args+=(--filter "${OPT_FILTER}")
+  fi
+  _test_args+=(--no-build --logger "console;verbosity=normal")
+  if eval "${_test_args[@]}"; then
     log_ok "${label} tests PASSED"
   else
     log_error "${label} tests FAILED"
@@ -501,7 +509,14 @@ EOF
     # Start port-forward and wait until the local port actually accepts connections.
     local load_port=18080
     # Kill any stale port-forward from a previous run on this port (idempotent).
-    fuser -k "${load_port}/tcp" &>/dev/null || true
+    # Kill any process listening on the port (macOS: lsof, Linux: fuser).
+    if command -v lsof &>/dev/null; then
+      lsof -ti "tcp:${load_port}" | xargs kill &>/dev/null || true
+    elif command -v fuser &>/dev/null; then
+      fuser -k "${load_port}/tcp" &>/dev/null || true
+    else
+      log_warn "No tool to kill port-forward from previous run — proceeding anyway."
+    fi
 
     mkdir -p "${REPO_ROOT}/.tmp"
     log_step "Starting port-forward svc/${load_name}-svc -> localhost:${load_port}..."

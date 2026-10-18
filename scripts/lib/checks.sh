@@ -45,16 +45,21 @@ check_dotnet() {
 }
 
 check_container_runtime() {
-  # Prefer podman, fall back to docker
+  # Detect the available container image builder.
+  # Priority: podman > docker > container (Apple Silicon).
   if command -v podman &>/dev/null; then
     CONTAINER_RUNTIME="podman"
     log_ok "Container runtime: podman ($(podman --version 2>/dev/null | head -1))"
   elif command -v docker &>/dev/null; then
     CONTAINER_RUNTIME="docker"
     log_ok "Container runtime: docker ($(docker --version 2>/dev/null))"
+  elif command -v container &>/dev/null; then
+    CONTAINER_RUNTIME="container"
+    log_ok "Container runtime: Apple 'container' tool ($(container --version 2>/dev/null | head -1 || echo 'installed'))"
   else
-    log_error "Neither 'podman' nor 'docker' was found on PATH."
-    log_error "  Install hint: https://podman.io  or  https://docs.docker.com/get-docker/"
+    log_error "No container image builder found on PATH."
+    log_error "  Install hint: podman (https://podman.io), docker (https://docker.com), or"
+    log_error "  Apple 'container' tool (brew install apple-container)."
     return 1
   fi
   export CONTAINER_RUNTIME
@@ -79,6 +84,18 @@ check_k3d() {
     fi
   fi
   log_ok "k3d found: $(k3d version 2>/dev/null | head -1)"
+}
+
+# Check for Apple's 'container' tool (macOS-only).
+# This tool provides native Kubernetes cluster management on Apple Silicon Macs.
+check_container_tool() {
+  if command -v container &>/dev/null; then
+    log_ok "Apple 'container' tool found: $(container --version 2>/dev/null | head -1 || echo 'installed')"
+    return 0
+  fi
+  # On Linux, 'container' may not be available — this is expected.
+  log_info "'container' tool not found (expected on Linux)."
+  return 0
 }
 
 check_helm() {
@@ -139,7 +156,17 @@ check_integration_prereqs() {
   local ok=0
   check_dotnet    || ok=1
   check_kubectl   || ok=1
-  check_k3d       || ok=1
+  # Require at least one Kubernetes runtime.
+  if ! command -v k3d &>/dev/null && ! command -v container &>/dev/null; then
+    log_error "Need either 'k3d' (Linux) or 'container' (macOS Apple Silicon)."
+    ok=1
+  else
+    if command -v k3d &>/dev/null; then
+      log_ok "Kubernetes runtime: k3d"
+    else
+      log_ok "Kubernetes runtime: Apple 'container' tool (macOS)"
+    fi
+  fi
   check_container_runtime || ok=1
   return $ok
 }
@@ -149,7 +176,20 @@ check_e2e_prereqs() {
   local ok=0
   check_dotnet            || ok=1
   check_kubectl           || ok=1
-  check_k3d               || ok=1
+  # Require at least one Kubernetes runtime.
+  if ! command -v k3d &>/dev/null && ! command -v container &>/dev/null; then
+    log_error "Need either 'k3d' (Linux) or 'container' (macOS Apple Silicon)."
+    log_error "  k3d:   https://k3d.io/#installation"
+    log_error "  container: brew install apple-container (or via Apple's container CLI)"
+    ok=1
+  else
+    # Log which runtime was detected.
+    if command -v k3d &>/dev/null; then
+      log_ok "Kubernetes runtime: k3d"
+    else
+      log_ok "Kubernetes runtime: Apple 'container' tool (macOS)"
+    fi
+  fi
   check_container_runtime || ok=1
   check_java              || ok=1
   return $ok
@@ -167,7 +207,17 @@ check_performance_load_prereqs() {
   local ok=0
   check_dotnet            || ok=1
   check_kubectl           || ok=1
-  check_k3d               || ok=1
+  # Require at least one Kubernetes runtime.
+  if ! command -v k3d &>/dev/null && ! command -v container &>/dev/null; then
+    log_error "Need either 'k3d' (Linux) or 'container' (macOS Apple Silicon)."
+    ok=1
+  else
+    if command -v k3d &>/dev/null; then
+      log_ok "Kubernetes runtime: k3d"
+    else
+      log_ok "Kubernetes runtime: Apple 'container' tool (macOS)"
+    fi
+  fi
   check_container_runtime || ok=1
   check_k6                || ok=1
   return $ok

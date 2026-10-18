@@ -542,24 +542,6 @@ public sealed class VirtualRepositoryReconciler(
         var volumes = new List<V1Volume>(BuildNginxVolumes(name));
         volumes.Add(new() { Name = "proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-proxy-cm" } });
 
-        // When metrics is enabled, add nginx-logs emptyDir (shared between
-        // NGINX and mtail) and mtail-config ConfigMap volume.
-        if (metricsEnabled)
-        {
-            volumes.Add(new V1Volume { Name = "nginx-logs", EmptyDir = new V1EmptyDirVolumeSource() });
-            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
-        }
-
-        // When metrics is enabled, add nginx-logs emptyDir (shared between
-        // NGINX and mtail) and mtail-config ConfigMap volume.
-        if (metricsEnabled)
-        {
-            volumes.Add(new V1Volume { Name = "nginx-logs", EmptyDir = new V1EmptyDirVolumeSource() });
-            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
-        }
-
-        // When metrics is enabled, add nginx-logs emptyDir (shared between
-        // NGINX and mtail) and mtail-config ConfigMap volume.
         var containers = new List<V1Container>
         {
             // NGINX — main container (carries user-specified resources).
