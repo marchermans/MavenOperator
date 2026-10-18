@@ -31,6 +31,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
             cluster.Client,
             new KubernetesResourceManager(cluster.Client, NullLogger<KubernetesResourceManager>.Instance),
             new HtpasswdService(),
+            new NginxConfigRenderer(),
             NSubstitute.Substitute.For<MavenOperator.Services.IKubernetesEventService>(),
             NullLogger<VirtualRepositoryReconciler>.Instance
         );
@@ -40,7 +41,8 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
         List<string> members,
         AuthPolicy downloadPolicy      = AuthPolicy.Anonymous,
         List<string>? downloadSecrets  = null,
-        string? pathPrefix = null)
+        string? pathPrefix = null,
+        bool metricsEnabled = false)
     {
         var entity = new MavenRepositoryV1Alpha1
         {
@@ -65,6 +67,7 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
                     },
                     Upload = new() { Policy = AuthPolicy.Anonymous },
                 },
+                Metrics = new() { Enabled = metricsEnabled },
             },
         };
 
@@ -210,17 +213,17 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
     public async Task Reconcile_CreatesSingleMergedDeployment_WithNginxAndProxySidecar()
     {
         var name   = $"int-virt-{Guid.NewGuid().ToString("N")[..6]}";
-        var entity = await BuildEntityAsync(name, members: ["releases"]);
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: false);
 
         await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
 
-        // Exactly one deployment: nginx (main) + proxy (sidecar), hosted-repo pattern.
+        // Exactly one deployment: nginx (main) + proxy (sidecar), 2 containers when metrics disabled.
         var deploy = await cluster.Client.GetAsync<V1Deployment>(
             $"{name}-nginx", cluster.Namespace, CancellationToken.None);
 
         deploy.ShouldNotBeNull();
         var containers = deploy.Spec!.Template.Spec!.Containers!;
-        containers.Count.ShouldBe(2);
+        containers.Count.ShouldBe(2, "Virtual pod without metrics: 2 containers (nginx + proxy)");
 
         var proxy = containers.Single(c => c.Name == "proxy");
         var expectedImage = Environment.GetEnvironmentVariable("VIRTUAL_PROXY_IMAGE")
@@ -271,6 +274,122 @@ public sealed class VirtualRepositoryReconcilerTests(ClusterFixture cluster)
 
         legacy.ShouldBeNull();
         merged.ShouldNotBeNull();
+    }
+
+    // ── Metrics sidecars ──────────────────────────────────────────────────────
+
+    [IntegrationFact]
+    public async Task Reconcile_MetricsEnabled_Deployment_HasFourContainers()
+    {
+        var name = $"int-virt-m6a-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: true);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var deploy = await cluster.Client.GetAsync<V1Deployment>($"{name}-nginx", cluster.Namespace, CancellationToken.None);
+        deploy.ShouldNotBeNull();
+        var containers = deploy.Spec!.Template.Spec!.Containers!.ToList();
+        containers.Count.ShouldBe(4, "Metrics-enabled Virtual pod: 4 containers (nginx + proxy + nginx-exporter + mtail)");
+
+        containers.ShouldContain(c => c.Name == "nginx", "nginx container required");
+        containers.ShouldContain(c => c.Name == "proxy", "proxy sidecar required");
+        containers.ShouldContain(c => c.Name == "nginx-exporter", "nginx-prometheus-exporter sidecar required");
+        containers.ShouldContain(c => c.Name == "mtail", "mtail sidecar required");
+
+        // Verify proxy-sidecar port 8080 is still present
+        var proxyContainer = containers.Single(c => c.Name == "proxy");
+        proxyContainer.Ports.ShouldContain(p => p.ContainerPort == 8080, "proxy sidecar must expose port 8080");
+
+        // Verify metrics containers have correct ports
+        var exporter = containers.Single(c => c.Name == "nginx-exporter");
+        exporter.Ports.ShouldContain(p => p.ContainerPort == 9113, "nginx-exporter must expose port 9113");
+
+        var mtail = containers.Single(c => c.Name == "mtail");
+        mtail.Ports.ShouldContain(p => p.ContainerPort == 3903, "mtail must expose port 3903");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_MetricsEnabled_MtailConfigMap_IsCreated()
+    {
+        var name = $"int-virt-m6a-cm-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: true);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-mtail-cm", cluster.Namespace, CancellationToken.None);
+        cm.ShouldNotBeNull("mtail ConfigMap must be created when metrics are enabled");
+        cm!.Data.ShouldContainKey("maven.mtail", "mtail ConfigMap must contain the maven.mtail program key");
+        cm.Data["maven.mtail"].Length.ShouldBeGreaterThan(0, "maven.mtail program must not be empty");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_MetricsEnabled_Service_HasMetricsPorts()
+    {
+        var name = $"int-virt-m6a-svc-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: true);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var svc = await cluster.Client.GetAsync<V1Service>($"{name}-svc", cluster.Namespace, CancellationToken.None);
+        svc.ShouldNotBeNull();
+        var ports = svc!.Spec.Ports.ToList();
+        ports.ShouldContain(p => p.Name == "nginx-metrics", "Service must expose the nginx-metrics port when metrics are enabled");
+        ports.ShouldContain(p => p.Name == "mtail-metrics", "Service must expose the mtail-metrics port when metrics are enabled");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_MetricsEnabled_Deployment_HasNginxLogsVolume()
+    {
+        var name = $"int-virt-m6a-vol-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: true);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var deploy = await cluster.Client.GetAsync<V1Deployment>($"{name}-nginx", cluster.Namespace, CancellationToken.None);
+        var volumes = deploy!.Spec.Template.Spec.Volumes.ToList();
+        volumes.ShouldContain(v => v.Name == "nginx-logs", "nginx-logs emptyDir volume required to share NGINX access log with mtail");
+        volumes.ShouldContain(v => v.Name == "mtail-config", "mtail-config volume (from ConfigMap) required to mount the mtail program");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_MetricsDisabled_Service_HasOnlyHttpPort()
+    {
+        var name = $"int-virt-m6a-svo-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: false);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var svc = await cluster.Client.GetAsync<V1Service>($"{name}-svc", cluster.Namespace, CancellationToken.None);
+        var ports = svc!.Spec.Ports.ToList();
+        ports.Count.ShouldBe(1, "Service with metrics disabled must expose only the http port");
+        ports[0].Name.ShouldBe("http");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_DisablingMetrics_CleansUpMtailResources()
+    {
+        var name = $"int-virt-m6a-clean-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, members: ["releases"], metricsEnabled: true);
+        var reconciler = BuildReconciler();
+
+        // First run with metrics enabled
+        await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        // Fetch mtail ConfigMap (should exist)
+        var cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-mtail-cm", cluster.Namespace, CancellationToken.None);
+        cm.ShouldNotBeNull("mtail ConfigMap must exist after first reconcile with metrics enabled");
+
+        // Re-fetch entity (resourceVersion may change)
+        entity = await cluster.Client.GetAsync<MavenRepositoryV1Alpha1>(name, cluster.Namespace, CancellationToken.None)
+            ?? throw new InvalidOperationException("Entity disappeared");
+
+        // Second run with metrics disabled
+        entity.Spec.Metrics = new() { Enabled = false };
+        await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        // mtail ConfigMap should be deleted
+        cm = await cluster.Client.GetAsync<V1ConfigMap>($"{name}-mtail-cm", cluster.Namespace, CancellationToken.None);
+        cm.ShouldBeNull("mtail ConfigMap must be deleted when metrics is disabled");
     }
 
     [IntegrationFact]

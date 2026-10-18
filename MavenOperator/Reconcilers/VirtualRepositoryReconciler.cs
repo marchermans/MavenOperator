@@ -31,6 +31,7 @@ public sealed class VirtualRepositoryReconciler(
     IKubernetesClient k8s,
     IKubernetesResourceManager resources,
     IHtpasswdService htpasswd,
+    INginxConfigRenderer nginx,
     IKubernetesEventService events,
     ILogger<VirtualRepositoryReconciler> logger)
     : IVirtualRepositoryReconciler
@@ -148,16 +149,25 @@ public sealed class VirtualRepositoryReconciler(
 
         // 4 ── NGINX ConfigMap (auth_basic front + proxy_pass to C# proxy sidecar)
         var uploadPolicy = spec.Auth.Upload.Policy;
-        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, uploadPolicy, repositoryPathPrefix, uploadEnabled);
+        var nginxConfig   = RenderNginxVirtualConfig(name, spec.Auth.Download.Policy, uploadPolicy, spec.Metrics, repositoryPathPrefix, uploadEnabled);
 
         await resources.EnsureConfigMapAsync(entity, $"{name}-nginx-cm",
             new Dictionary<string, string> { ["default.conf"] = nginxConfig }, ct);
 
-        // 5 ── Single merged Deployment: nginx (main) + C# proxy (sidecar) ───────
+        // 5 ── mtail ConfigMap (when metrics enabled) ─────────────────────────
+        if (spec.Metrics.Enabled)
+        {
+            var mtailConfig = nginx.RenderMtailConfig();
+            await resources.EnsureConfigMapAsync(entity, $"{name}-mtail-cm",
+                new Dictionary<string, string> { ["maven.mtail"] = mtailConfig }, ct);
+        }
+
+        // 5b ── Single merged Deployment: nginx (main) + C# proxy (sidecar)
+        //      + optional metrics sidecars (nginx-exporter + mtail)
         // Same pattern as hosted repos' auth-proxy / metadata-broker sidecars.
         // Per-component hashes so config changes are observable per component;
         // any change rolls the single deployment. k8s only routes traffic to the
-        // pod once ALL containers (nginx + proxy) are Ready, eliminating the
+        // pod once ALL containers (nginx + proxy [+ metrics]) are Ready, eliminating the
         // startup window where nginx would answer 502 for an unready proxy.
         var uploadHtpasswdForHash = uploadEnabled ? await BuildHtpasswdAsync(spec.Auth.Upload, ns, ct) : string.Empty;
 
@@ -176,8 +186,18 @@ public sealed class VirtualRepositoryReconciler(
         // Data traffic never uses it — nginx reaches the proxy over loopback.
         await resources.EnsureServiceAsync(entity, $"{name}-proxy-svc", deploymentName, ProxyPort, ct);
 
-        // 7 ── External NGINX Service (:80 → nginx container) ───────────────────
-        await resources.EnsureServiceAsync(entity, $"{name}-svc", deploymentName, ct);
+        // 7 ── External NGINX Service (:80 → nginx container)
+        // When metrics are enabled, also expose the exporter and mtail ports.
+        var servicePorts = new List<V1ServicePort>
+        {
+            new() { Name = "http", Port = 80, TargetPort = 80 },
+        };
+        if (spec.Metrics.Enabled)
+        {
+            servicePorts.Add(new V1ServicePort { Name = "nginx-metrics", Port = spec.Metrics.ExporterPort, TargetPort = spec.Metrics.ExporterPort });
+            servicePorts.Add(new V1ServicePort { Name = "mtail-metrics",  Port = spec.Metrics.MtailPort,    TargetPort = spec.Metrics.MtailPort });
+        }
+        await resources.EnsureServiceWithPortsAsync(entity, $"{name}-svc", deploymentName, servicePorts, ct);
 
         entity.Status.SetCondition("Available", isTrue: true,
             reason: "DeploymentEnsured", message: "Virtual repo deployment (NGINX + C# proxy sidecar) ensured");
@@ -305,6 +325,14 @@ public sealed class VirtualRepositoryReconciler(
             await resources.DeleteCustomResourceIfExistsAsync(
                 "gateway.networking.k8s.io", "v1", "httproutes", $"{name}-route", ns, ct);
         }
+
+        // ── Metrics: delete PodMonitor + mtail ConfigMap if no longer enabled ─
+        if (!spec.Metrics.Enabled)
+        {
+            await resources.DeleteCustomResourceIfExistsAsync(
+                "monitoring.coreos.com", "v1", "podmonitors", $"{name}-metrics", ns, ct);
+            await resources.DeleteResourceIfExistsAsync<V1ConfigMap>($"{name}-mtail-cm", ns, ct);
+        }
     }
 
     private async Task<string> BuildHtpasswdAsync(
@@ -346,11 +374,13 @@ public sealed class VirtualRepositoryReconciler(
     /// - Optionally enforces Basic Auth for downloads and uploads
     /// - Proxies GET/HEAD to the C# aggregation proxy (read-only behavior)
     /// - When uploadEnabled is true, also proxies PUT/DELETE/MKCOL through with upload auth enforcement
+    /// - When metricsEnabled is true, exposes a separate stub_status listener
     /// </summary>
     private static string RenderNginxVirtualConfig(
         string name,
         AuthPolicy downloadPolicy,
         AuthPolicy uploadPolicy,
+        MetricsSpec metrics,
         string repositoryPathPrefix,
         bool uploadEnabled)
     {
@@ -402,7 +432,8 @@ public sealed class VirtualRepositoryReconciler(
         var proxyReadTimeout = uploadEnabled ? "300s" : "120s";
 
         // Build the full config using double-dollar raw string to escape NGINX braces.
-        return $$"""
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($$"""
             server {
                 listen 80;
                 server_name _;
@@ -434,7 +465,32 @@ public sealed class VirtualRepositoryReconciler(
                     client_max_body_size {{clientMaxBodySize}};
                 }
             }
-            """;
+            """);
+
+        // When metrics is enabled, add a separate server block exposing stub_status
+        // for the nginx-prometheus-exporter sidecar to scrape.
+        if (metrics.Enabled)
+        {
+            // Build stub_status server block (stub_status listener for metrics sidecar)
+            var stubServer = "\n" +
+                "            server {\n" +
+                $"                listen {metrics.StubStatusPort};\n" +
+                "                server_name _;\n" +
+                "\n" +
+                "                location = /healthz {\n" +
+                "                    access_log off;\n" +
+                $"                    return 200 \"OK\\n\";\n" +
+                "                    add_header Content-Type text/plain;\n" +
+                "                }\n" +
+                "\n" +
+                "                location /stub_status {\n" +
+                "                    stub_status;\n" +
+                "                }\n" +
+                "            }\n";
+            sb.AppendLine(stubServer);
+        }
+
+        return sb.ToString();
     }
 
     private static string Indent(string text, int spaces)
@@ -473,6 +529,7 @@ public sealed class VirtualRepositoryReconciler(
     /// Single pod for a Virtual repository: NGINX as the main container (carries
     /// user-specified resources, same convention as hosted repos) plus the C#
     /// aggregation proxy as a sidecar with fixed modest defaults.
+    /// When metrics is enabled, also injects nginx-prometheus-exporter and mtail.
     /// The proxy binds 0.0.0.0 so {name}-proxy-svc can reach its upload-status
     /// endpoint for operator polling; nginx reaches it over loopback only.
     /// </summary>
@@ -480,90 +537,174 @@ public sealed class VirtualRepositoryReconciler(
     {
         var res = BuildResources(spec);
         bool uploadEnabled = spec.Virtual?.Upload?.Targets.Count > 0;
+        bool metricsEnabled = spec.Metrics.Enabled;
 
-        return new V1PodSpec
+        var volumes = new List<V1Volume>(BuildNginxVolumes(name));
+        volumes.Add(new() { Name = "proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-proxy-cm" } });
+
+        // When metrics is enabled, add nginx-logs emptyDir (shared between
+        // NGINX and mtail) and mtail-config ConfigMap volume.
+        if (metricsEnabled)
         {
-            Containers =
-            [
-                // NGINX — main container (carries user-specified resources).
-                new V1Container
+            volumes.Add(new V1Volume { Name = "nginx-logs", EmptyDir = new V1EmptyDirVolumeSource() });
+            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
+        }
+
+        // When metrics is enabled, add nginx-logs emptyDir (shared between
+        // NGINX and mtail) and mtail-config ConfigMap volume.
+        if (metricsEnabled)
+        {
+            volumes.Add(new V1Volume { Name = "nginx-logs", EmptyDir = new V1EmptyDirVolumeSource() });
+            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
+        }
+
+        // When metrics is enabled, add nginx-logs emptyDir (shared between
+        // NGINX and mtail) and mtail-config ConfigMap volume.
+        var containers = new List<V1Container>
+        {
+            // NGINX — main container (carries user-specified resources).
+            new V1Container
+            {
+                Name            = "nginx",
+                Image           = NginxImage,
+                ImagePullPolicy = "IfNotPresent",
+                Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
+                Resources       = res,
+                VolumeMounts    = BuildNginxVolumeMounts(uploadEnabled, metricsEnabled),
+                LivenessProbe   = new V1Probe
                 {
-                    Name            = "nginx",
-                    Image           = NginxImage,
-                    ImagePullPolicy = "IfNotPresent",
-                    Ports           = [new V1ContainerPort { ContainerPort = 80, Name = "http" }],
-                    Resources       = res,
-                    VolumeMounts    = BuildNginxVolumeMounts(uploadEnabled),
-                    LivenessProbe   = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 5,
-                        PeriodSeconds       = 15,
-                    },
-                    ReadinessProbe  = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
-                        InitialDelaySeconds = 3,
-                        PeriodSeconds       = 10,
-                    },
+                    HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
+                    InitialDelaySeconds = 5,
+                    PeriodSeconds       = 15,
                 },
-                // C# aggregation proxy sidecar (metadata merging + upload fan-out).
-                new V1Container
+                ReadinessProbe  = new V1Probe
                 {
-                    Name            = "proxy",
-                    Image           = ProxyImage,
-                    ImagePullPolicy = "IfNotPresent",
-                    Ports           = [new V1ContainerPort { ContainerPort = ProxyPort, Name = "http" }],
-                    // Fixed modest budget — spec.resources applies to nginx only.
-                    Resources       = new V1ResourceRequirements
-                    {
-                        Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("64Mi")  },
-                        Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },
-                    },
-                    Env             =
-                    [
-                        new V1EnvVar { Name = "ASPNETCORE_URLS", Value = $"http://+:{ProxyPort}" },
-                    ],
-                    VolumeMounts    =
-                    [
-                        new V1VolumeMount
-                        {
-                            Name             = "proxy-config",
-                            MountPath        = "/app/config",
-                            ReadOnlyProperty = true,
-                        },
-                    ],
-                    LivenessProbe   = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
-                        InitialDelaySeconds = 5,
-                        PeriodSeconds       = 15,
-                    },
-                    ReadinessProbe  = new V1Probe
-                    {
-                        HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
-                        InitialDelaySeconds = 3,
-                        PeriodSeconds       = 10,
-                    },
+                    HttpGet             = new V1HTTPGetAction { Path = "/healthz", Port = 80 },
+                    InitialDelaySeconds = 3,
+                    PeriodSeconds       = 10,
                 },
-            ],
-            Volumes =
-            [
-                ..BuildNginxVolumes(name),
-                new() { Name = "proxy-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-proxy-cm" } },
-            ],
+            },
+            // C# aggregation proxy sidecar (metadata merging + upload fan-out).
+            new V1Container
+            {
+                Name            = "proxy",
+                Image           = ProxyImage,
+                ImagePullPolicy = "IfNotPresent",
+                Ports           = [new V1ContainerPort { ContainerPort = ProxyPort, Name = "http" }],
+                // Fixed modest budget — spec.resources applies to nginx only.
+                Resources       = new V1ResourceRequirements
+                {
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("64Mi")  },
+                    Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("200m"), ["memory"] = new("256Mi") },
+                },
+                Env             =
+                [
+                    new V1EnvVar { Name = "ASPNETCORE_URLS", Value = $"http://+:{ProxyPort}" },
+                ],
+                VolumeMounts    =
+                [
+                    new V1VolumeMount
+                    {
+                        Name             = "proxy-config",
+                        MountPath        = "/app/config",
+                        ReadOnlyProperty = true,
+                    },
+                ],
+                LivenessProbe   = new V1Probe
+                {
+                    HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
+                    InitialDelaySeconds = 5,
+                    PeriodSeconds       = 15,
+                },
+                ReadinessProbe  = new V1Probe
+                {
+                    HttpGet             = new V1HTTPGetAction { Path = "/health", Port = ProxyPort },
+                    InitialDelaySeconds = 3,
+                    PeriodSeconds       = 10,
+                },
+            },
         };
+
+        // When metrics is enabled, inject nginx-exporter and mtail sidecars.
+        if (metricsEnabled)
+        {
+            var noPrivEscReadOnly = new V1SecurityContext
+            {
+                AllowPrivilegeEscalation = false,
+                ReadOnlyRootFilesystem   = true,
+                Capabilities             = new V1Capabilities { Drop = ["ALL"] },
+            };
+
+            // mtail writes runtime state under /tmp; keep least privilege but allow writable root.
+            var noPrivEscWritableRoot = new V1SecurityContext
+            {
+                AllowPrivilegeEscalation = false,
+                ReadOnlyRootFilesystem   = false,
+                Capabilities             = new V1Capabilities { Drop = ["ALL"] },
+            };
+
+            // nginx-logs emptyDir shared between NGINX and mtail.
+            volumes.Add(new V1Volume { Name = "nginx-logs", EmptyDir = new V1EmptyDirVolumeSource() });
+            volumes.Add(new V1Volume { Name = "mtail-config", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-mtail-cm" } });
+
+            containers.Add(new V1Container
+            {
+                Name            = "nginx-exporter",
+                Image           = spec.Metrics.NginxExporterImage,
+                ImagePullPolicy = "IfNotPresent",
+                Args            = [$"--nginx.scrape-uri=http://127.0.0.1:{spec.Metrics.StubStatusPort}/stub_status"],
+                Ports           = [new V1ContainerPort { ContainerPort = spec.Metrics.ExporterPort, Name = "nginx-metrics" }],
+                Resources       = new V1ResourceRequirements
+                {
+                    Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("50m"),  ["memory"] = new("32Mi") },
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("10m"),  ["memory"] = new("16Mi") },
+                },
+                SecurityContext = noPrivEscReadOnly,
+            });
+
+            containers.Add(new V1Container
+            {
+                Name            = "mtail",
+                Image           = spec.Metrics.MtailImage,
+                ImagePullPolicy = "IfNotPresent",
+                Args            =
+                [
+                    "--progs=/etc/mtail/maven.mtail",
+                    "--logs=/var/log/nginx/access.json",
+                    $"--port={spec.Metrics.MtailPort}",
+                    "--expired_metrics_gc_interval=168h",
+                    "--logtostderr",
+                ],
+                Ports        = [new V1ContainerPort { ContainerPort = spec.Metrics.MtailPort, Name = "mtail-metrics" }],
+                VolumeMounts =
+                [
+                    new V1VolumeMount { Name = "nginx-logs",   MountPath = "/var/log/nginx",  ReadOnlyProperty = true },
+                    new V1VolumeMount { Name = "mtail-config", MountPath = "/etc/mtail",       ReadOnlyProperty = true },
+                ],
+                Resources = new V1ResourceRequirements
+                {
+                    Limits   = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("64Mi") },
+                    Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("20m"),  ["memory"] = new("32Mi") },
+                },
+                SecurityContext = noPrivEscWritableRoot,
+            });
+        }
+
+        return new V1PodSpec { Containers = containers, Volumes = volumes };
     }
 
     /// <summary>Builds volume mounts for the NGINX container.</summary>
-    private static List<V1VolumeMount> BuildNginxVolumeMounts(bool uploadEnabled) =>
+    private static List<V1VolumeMount> BuildNginxVolumeMounts(bool uploadEnabled, bool metricsEnabled) =>
     [
         new() { Name = "nginx-conf", MountPath = ConfPath, ReadOnlyProperty = true },
         new() { Name = "download-auth", MountPath = AuthPath, ReadOnlyProperty = true },
-        ..(uploadEnabled ? new[] { new V1VolumeMount { Name = "upload-auth", MountPath = "/etc/nginx/upload-auth", ReadOnlyProperty = true } } : Array.Empty<V1VolumeMount>())
+        ..(uploadEnabled ? new[] { new V1VolumeMount { Name = "upload-auth", MountPath = "/etc/nginx/upload-auth", ReadOnlyProperty = true } } : Array.Empty<V1VolumeMount>()),
+        ..(metricsEnabled ? new[] { new V1VolumeMount { Name = "nginx-logs", MountPath = "/var/log/nginx" } } : Array.Empty<V1VolumeMount>())
     ];
 
-    /// <summary>Builds volumes for the NGINX deployment.</summary>
+    /// <summary>Builds volumes for the NGINX deployment (non-metrics volumes only).
+    /// Metrics volumes (nginx-logs, mtail-config) are added separately.
+    /// </summary>
     private static List<V1Volume> BuildNginxVolumes(string name) =>
     [
         new() { Name = "nginx-conf", ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" } },
