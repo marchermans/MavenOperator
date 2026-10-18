@@ -529,6 +529,46 @@ spec:
                   type: object
                   nullable: true
                   x-kubernetes-preserve-unknown-fields: true
+                replicas:
+                  type: integer
+                  nullable: true
+                  description: >
+                    Number of replicas for the repository deployment. Defaults to 1 when omitted.
+                    Set to 0 to pause the repository (deployment scaled down, no pods).
+                topologySpreadConstraint:
+                  type: object
+                  nullable: true
+                  description: >
+                    Topology spread constraint for the repository deployment pods.
+                    When configured, ensures pods are distributed across topologies.
+                    Defaults to topologyKey: kubernetes.io/hostname, maxSkew: 1,
+                    whenUnsatisfiable: ScheduleAnyway when topologyKey is omitted.
+                  properties:
+                    topologyKey:
+                      type: string
+                      nullable: true
+                      description: >
+                        The label key that defines the topology domain (e.g. kubernetes.io/hostname, kubernetes.io/os).
+                        Defaults to kubernetes.io/hostname when omitted.
+                    maxSkew:
+                      type: integer
+                      default: 1
+                      description: >
+                        How many pods may differ from the minimum number of pods in any topology relative to maxSkew.
+                        Defaults to 1 when omitted.
+                    whenUnsatisfiable:
+                      type: string
+                      enum: [ScheduleAnyway, DoNotSchedule]
+                      description: >
+                        What to do if a pod cannot be placed to satisfy the constraint.
+                        Defaults to ScheduleAnyway when omitted.
+                    labelSelector:
+                      type: object
+                      nullable: true
+                      x-kubernetes-preserve-unknown-fields: true
+                      description: >
+                        Optional label selector to restrict which pods are counted in the skew calculation.
+                        When null, all pods in the deployment are counted.
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true
