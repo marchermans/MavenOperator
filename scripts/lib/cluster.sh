@@ -162,42 +162,39 @@ cluster_preload_sidecar_images() {
   log_section "Pre-loading sidecar images"
 
   for img in "${SIDECAR_IMAGES[@]}"; do
-    # Check if the image is already present in the cluster's containerd
-    # (skip re-import on re-runs to keep startup fast).
-    # Use the abstracted node list from runtime.sh.
-    local _all_nodes
-    _all_nodes=$(cluster_get_nodes)
-
-    if [[ -z "$_all_nodes" ]]; then
-      log_warn "Could not get nodes — skipping sidecar pre-load check."
-      continue
-    fi
-
     # For k3d: check the server node's containerd directly.
     # For container: pre-load images into the cluster.
     # For external: skip (pods will pull from registry).
+    #
+    # IMPORTANT: this function MUST never fail under 'set -euo pipefail'.
+    # All individual steps are wrapped in '|| true' or 'if' blocks so that
+    # a missing image or unresponsive node does NOT abort the script.
+
     if [[ "${CLUSTER_TYPE}" == "k3d" ]]; then
       local _server_node="k3d-${K3D_CLUSTER_NAME}-server-0"
-      local _short="${img##*/}"         # e.g. nginx:1.27-alpine
-      local _short_name="${_short%%:*}" # e.g. nginx
-      local _short_tag="${_short##*:}"  # e.g. 1.27-alpine
+      local _short="${img##*/}"
+      local _short_name="${_short%%:*}"
+      local _short_tag="${_short##*:}"
 
+      # Check whether the image is already in containerd (skip re-import).
+      # Guard the pipeline result so pipefail cannot cause early exit.
+      local _in_containerd=false
       if docker exec "${_server_node}" crictl images 2>/dev/null \
           | awk -v name="${_short_name}" -v tag="${_short_tag}" \
-              '$1 ~ name && $2 == tag { found=1 } END { exit !found }'; then
+              '$1 ~ name && $2 == tag { found=1 } END { exit !found }' 2>/dev/null; then
+        _in_containerd=true
+      fi
+      if [[ "$_in_containerd" == "true" ]]; then
         log_info "  ${img} already in containerd — skipping."
         continue
       fi
     elif [[ "${CLUSTER_TYPE}" == "container" ]]; then
-      # For the container tool: pull then load into cluster.
-      # Must use the exact reference from 'container image ls'.
       log_step "Pulling and pre-loading '${img}' into cluster…"
-      if container image pull "${img}" 2>&1 | grep -q 'Unpacking'; then
-        # Extract the image name (without tag) for loading
-        local _img_name="${img%%:*}"
-        local _img_tag="${img##*:}"
-        # Load with the exact reference (including registry/path)
-        if container k8s load-image --name "${K3D_CLUSTER_NAME}" "${img}" 2>&1 | grep -q 'Importing'; then
+      # Wrap in '|| true' so a failed pull does not abort the script.
+      if container image pull "${img}" 2>&1 | grep -q 'Unpacking' 2>/dev/null || true; then
+        # Load with the exact reference (including registry/path).
+        if container k8s load-image --name "${K3D_CLUSTER_NAME}" "${img}" 2>&1 \
+            | grep -q 'Importing' 2>/dev/null; then
           log_ok "  ${img} pre-loaded successfully."
         else
           log_warn "  Failed to load '${img}' — pods will pull on first use."
@@ -208,19 +205,23 @@ cluster_preload_sidecar_images() {
       continue
     else
       log_info "  ${img} — will be pulled by pods from registry (no containerd pre-load for ${CLUSTER_TYPE})."
+      continue
     fi
 
     log_step "Pulling and importing '${img}'…"
-    if "${CONTAINER_RUNTIME}" pull "${img}"; then
-      # Use the abstracted image loading function (runtime-agnostic).
-      # For k3d, this exports to tar and imports into each node.
-      local _canonical
-      _canonical="$("${CONTAINER_RUNTIME}" save -o - "${img}" | k3d image import -c "${K3D_CLUSTER_NAME}" 2>/dev/null && echo "docker.io/library/${img}")" 2>/dev/null
+    # Wrap the pull in '|| true' so network failures don't abort the script.
+    if "${CONTAINER_RUNTIME}" pull "${img}" 2>/dev/null || true; then
+      # Import into k3d — use '|| true' so import failures don't abort.
+      "${CONTAINER_RUNTIME}" save -o - "${img}" 2>/dev/null \
+        | k3d image import -c "${K3D_CLUSTER_NAME}" 2>/dev/null \
+        || log_warn "  Could not import '${img}' — pods will pull on first use."
       log_ok "  ${img} pulled and imported."
     else
       log_warn "  Could not pull '${img}' — sidecar pods may pull from internet on first use."
     fi
   done
+  # Always exit 0 — failures are non-fatal for test execution.
+  return 0
 }
 
 # Save a container image to a tar file in Docker format.
