@@ -130,7 +130,7 @@ public sealed class HostedRepositoryReconciler(
             ["auth-proxy"]         = ComputeHash(authProxyConfigJson),
         };
 
-        await resources.EnsureDeploymentAsync(entity, deployName, componentHashes, podSpec, replicas: 1, ct);
+        await resources.EnsureDeploymentAsync(entity, deployName, componentHashes, podSpec, spec.Replicas ?? 1, ct, topologySpreadConstraint: spec.TopologySpreadConstraint);
 
         // 5 ── Service ─────────────────────────────────────────────────────────
         var servicePorts = BuildServicePorts(spec.Metrics);
