@@ -63,6 +63,20 @@ public sealed class MavenRepositorySpec
     /// nginx-prometheus-exporter and mtail sidecars into NGINX pods.
     /// </summary>
     public MetricsSpec Metrics { get; set; } = new();
+
+    /// <summary>
+    /// Number of replicas for the repository deployment. Defaults to 1 when omitted.
+    /// Set to 0 to pause the repository (deployment scaled down, no pods).
+    /// </summary>
+    public int? Replicas { get; set; }
+
+    /// <summary>
+    /// Topology spread constraint for the repository deployment pods.
+    /// When configured, ensures pods are distributed across topologies.
+    /// Defaults to topologyKey: kubernetes.io/hostname, maxSkew: 1,
+    /// whenUnsatisfiable: ScheduleAnyway when topologyKey is omitted.
+    /// </summary>
+    public TopologySpreadConstraintConfig? TopologySpreadConstraint { get; set; }
 }
 
 public enum RepositoryType
@@ -75,6 +89,48 @@ public enum RepositoryType
 
     /// <summary>Fans out to multiple member repositories; served by the C# aggregation proxy.</summary>
     Virtual,
+}
+
+/// <summary>
+/// Configuration for a Kubernetes TopologySpreadConstraint applied to repository deployments.
+/// </summary>
+public sealed class TopologySpreadConstraintConfig
+{
+    /// <summary>
+    /// The label key that defines the topology domain (e.g. kubernetes.io/hostname, kubernetes.io/os).
+    /// Defaults to kubernetes.io/hostname when omitted.
+    /// </summary>
+    public string? TopologyKey { get; set; }
+
+    /// <summary>
+    /// How many pods may differ from the minimum number of pods in any topology relative to maxSkew.
+    /// Defaults to 1 when omitted.
+    /// </summary>
+    public int MaxSkew { get; set; } = 1;
+
+    /// <summary>
+    /// What to do if a pod cannot be placed to satisfy the constraint.
+    /// Defaults to ScheduleAnyway when omitted.
+    /// </summary>
+    public TopologySpreadConstraintPolicy WhenUnsatisfiable { get; set; }
+
+    /// <summary>
+    /// Optional label selector to restrict which pods are counted in the skew calculation.
+    /// When null, all pods in the deployment are counted.
+    /// </summary>
+    public V1LabelSelector? LabelSelector { get; set; }
+}
+
+/// <summary>
+/// Policy for what to do when a TopologySpreadConstraint cannot be satisfied.
+/// </summary>
+public enum TopologySpreadConstraintPolicy
+{
+    /// <summary>Always schedule the pod, even if the constraint is not met.</summary>
+    ScheduleAnyway,
+
+    /// <summary>Do not schedule the pod if the constraint cannot be met.</summary>
+    DoNotSchedule,
 }
 
 
