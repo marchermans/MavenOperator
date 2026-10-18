@@ -43,6 +43,8 @@ public interface IKubernetesResourceManager
     /// Ensures an NGINX Deployment exists. If the config hash changes (content-addressed),
     /// the pod template annotation is updated to trigger a rolling restart.
     /// The hash is stored under the legacy maven.operator.io/config-hash key.
+    /// When <c>topologySpreadConstraint</c> is provided, the constraint is injected
+    /// into the pod template's <c>TopologySpreadConstraints</c> list.
     /// </summary>
     Task<V1Deployment> EnsureDeploymentAsync(
         MavenRepositoryV1Alpha1 owner,
@@ -50,13 +52,16 @@ public interface IKubernetesResourceManager
         string configHash,
         V1PodSpec podSpec,
         int replicas,
-        CancellationToken ct);
+        CancellationToken ct,
+        TopologySpreadConstraintConfig? topologySpreadConstraint = null);
 
     /// <summary>
     /// Ensures an NGINX Deployment exists, tracking one content hash per component.
     /// Each entry (kind → SHA-256) is written as its own pod-template annotation so
     /// per-component changes are observable. Any changed, missing or stale hash
     /// triggers a rolling restart.
+    /// When <c>topologySpreadConstraint</c> is provided, the constraint is injected
+    /// into the pod template's <c>TopologySpreadConstraints</c> list.
     /// </summary>
     Task<V1Deployment> EnsureDeploymentAsync(
         MavenRepositoryV1Alpha1 owner,
@@ -64,7 +69,8 @@ public interface IKubernetesResourceManager
         IReadOnlyDictionary<string, string> configHashes,
         V1PodSpec podSpec,
         int replicas,
-        CancellationToken ct);
+        CancellationToken ct,
+        TopologySpreadConstraintConfig? topologySpreadConstraint = null);
 
     /// <summary>Ensures a ClusterIP Service exists exposing port 80.</summary>
     Task<V1Service> EnsureServiceAsync(
@@ -406,10 +412,11 @@ public sealed class KubernetesResourceManager(
         string configHash,
         V1PodSpec podSpec,
         int replicas,
-        CancellationToken ct)
+        CancellationToken ct,
+        TopologySpreadConstraintConfig? topologySpreadConstraint = null)
         => EnsureDeploymentAsync(owner, deploymentName,
             new Dictionary<string, string> { ["config"] = configHash },
-            podSpec, replicas, ct);
+            podSpec, replicas, ct, topologySpreadConstraint);
 
     /// <summary>
     /// Ensures an NGINX Deployment exists. Each entry maps a hash kind (e.g.
@@ -424,7 +431,8 @@ public sealed class KubernetesResourceManager(
         IReadOnlyDictionary<string, string> configHashes,
         V1PodSpec podSpec,
         int replicas,
-        CancellationToken ct)
+        CancellationToken ct,
+        TopologySpreadConstraintConfig? topologySpreadConstraint = null)
     {
         var ns     = owner.Metadata.NamespaceProperty!;
         var labels = new Dictionary<string, string> { ["app"] = deploymentName };
@@ -469,6 +477,10 @@ public sealed class KubernetesResourceManager(
                         ann.Remove(key);
                     existing.Spec.Template.Spec = podSpec;
 
+                    // Inject TopologySpreadConstraint if configured.
+                    if (topologySpreadConstraint is not null)
+                        EnsureTopologySpreadConstraint(existing, topologySpreadConstraint);
+
                     var updated = await client.UpdateAsync(existing, ct);
                     logger.LogInformation(
                         "Updated Deployment {Namespace}/{Name} (changed config hashes: {Kinds})",
@@ -503,6 +515,10 @@ public sealed class KubernetesResourceManager(
                     },
                 };
 
+                // Inject TopologySpreadConstraint if configured.
+                if (topologySpreadConstraint is not null)
+                    EnsureTopologySpreadConstraint(deployment, topologySpreadConstraint);
+
                 var created = await client.CreateAsync(deployment, ct);
                 logger.LogInformation("Created Deployment {Namespace}/{Name}", ns, deploymentName);
                 return created;
@@ -523,6 +539,33 @@ public sealed class KubernetesResourceManager(
     /// </summary>
     private static string HashAnnotationKey(string kind) =>
         $"maven.operator.io/{kind}-hash";
+
+    /// <summary>
+    /// Injects a TopologySpreadConstraint into the deployment's pod template,
+    /// defaulting topologyKey to <c>kubernetes.io/hostname</c> when the user
+    /// did not specify one.
+    /// </summary>
+    private static void EnsureTopologySpreadConstraint(
+        V1Deployment deployment,
+        TopologySpreadConstraintConfig config)
+    {
+        var constraint = new V1TopologySpreadConstraint
+        {
+            TopologyKey = config.TopologyKey ?? "kubernetes.io/hostname",
+            MaxSkew = config.MaxSkew,
+            WhenUnsatisfiable = config.WhenUnsatisfiable switch
+            {
+                TopologySpreadConstraintPolicy.ScheduleAnyway => "ScheduleAnyway",
+                TopologySpreadConstraintPolicy.DoNotSchedule  => "DoNotSchedule",
+                _ => "ScheduleAnyway",
+            },
+            LabelSelector = config.LabelSelector,
+        };
+
+        var constraints = deployment.Spec!.Template!.Spec!.TopologySpreadConstraints
+            ?? (deployment.Spec.Template.Spec.TopologySpreadConstraints = new List<V1TopologySpreadConstraint>());
+        constraints.Add(constraint);
+    }
 
     /// <summary>True for any managed per-component config-hash annotation.</summary>
     private static bool IsManagedHashAnnotation(string key) =>
