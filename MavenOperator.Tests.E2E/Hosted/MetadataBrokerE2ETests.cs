@@ -237,8 +237,8 @@ public sealed class MetadataBrokerE2ETests : IAsyncLifetime
         using var resp = await e2e.HttpClient.SendAsync(req);
         var body = (await resp.Content.ReadAsStringAsync()).ToString();
         return (resp.StatusCode, body,
-            retryAfter:  resp.Headers.RetryAfter?.Delta?.TotalSeconds.ToString(),
-            etag:        resp.Headers.ETag?.Tag);
+            resp.Headers.RetryAfter?.Delta?.TotalSeconds.ToString(),
+            resp.Headers.ETag?.Tag);
     }
 
     /// <summary>PUT that surfaces the Retry-After header on error responses.</summary>
