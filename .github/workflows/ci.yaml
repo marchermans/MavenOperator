@@ -637,11 +637,7 @@ jobs:
     name: Push Import Job Image
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      release-tags
+    needs: [version, build-and-test, docker-build, release-tags]
     permissions:
       contents: read
       packages: write
@@ -671,12 +667,8 @@ jobs:
   release-metadata-broker-image:
     name: Push Metadata Broker Image
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      release-tags
+    needs: [version, build-and-test, docker-build, release-tags]
+    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
     permissions:
       contents: read
       packages: write
