@@ -336,8 +336,8 @@ public sealed class OrphanedResourceCleanupTests
         var k8s        = Substitute.For<KubeOps.KubernetesClient.IKubernetesClient>();
         var events     = Substitute.For<IKubernetesEventService>();
         var reconciler = new VirtualRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), events,
-            NullLogger<VirtualRepositoryReconciler>.Instance);
+            k8s, resources, new HtpasswdService(), new NginxConfigRenderer(),
+            events, NullLogger<VirtualRepositoryReconciler>.Instance);
 
         var entity = BuildVirtualEntity("virt-repo", "ns", ingressEnabled: false);
 
@@ -354,8 +354,8 @@ public sealed class OrphanedResourceCleanupTests
         var k8s        = Substitute.For<KubeOps.KubernetesClient.IKubernetesClient>();
         var events     = Substitute.For<IKubernetesEventService>();
         var reconciler = new VirtualRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), events,
-            NullLogger<VirtualRepositoryReconciler>.Instance);
+            k8s, resources, new HtpasswdService(), new NginxConfigRenderer(),
+            events, NullLogger<VirtualRepositoryReconciler>.Instance);
 
         var entity = BuildVirtualEntity("virt-repo", "ns", gatewayEnabled: false);
 
@@ -372,8 +372,8 @@ public sealed class OrphanedResourceCleanupTests
         var k8s        = Substitute.For<KubeOps.KubernetesClient.IKubernetesClient>();
         var events     = Substitute.For<IKubernetesEventService>();
         var reconciler = new VirtualRepositoryReconciler(
-            k8s, resources, new HtpasswdService(), events,
-            NullLogger<VirtualRepositoryReconciler>.Instance);
+            k8s, resources, new HtpasswdService(), new NginxConfigRenderer(),
+            events, NullLogger<VirtualRepositoryReconciler>.Instance);
 
         var entity = BuildVirtualEntity("virt-repo", "ns", ingressEnabled: true);
 
