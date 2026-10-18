@@ -547,15 +547,7 @@ jobs:
     name: Push Operator Image
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
-      release-tags
+    needs: [version, build-and-test, docker-build, release-tags]
     permissions:
       contents: read
       packages: write
@@ -585,15 +577,7 @@ jobs:
     name: Push Virtual Proxy Image
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
-      release-tags
+    needs: [version, build-and-test, docker-build, release-tags]
     permissions:
       contents: read
       packages: write
@@ -623,15 +607,7 @@ jobs:
     name: Push Auth Proxy Image
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
-      release-tags
+    needs: [version, build-and-test, docker-build, release-tags]
     permissions:
       contents: read
       packages: write
@@ -665,10 +641,6 @@ jobs:
       version
       build-and-test
       docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
       release-tags
     permissions:
       contents: read
@@ -704,10 +676,6 @@ jobs:
       version
       build-and-test
       docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
       release-tags
     permissions:
       contents: read
@@ -738,20 +706,9 @@ jobs:
     name: Publish Helm Chart
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs:
-      version
-      build-and-test
-      docker-build
-      integration:
-        required: false  # Disabled test job - skip gracefully
-      performance:
-        required: false  # Disabled test job - skip gracefully
-      release-tags
-      release-operator-image
-      release-virtual-proxy-image
-      release-auth-proxy-image
-      release-import-job-image
-      release-metadata-broker-image
+    needs: [version, build-and-test, docker-build, release-tags,
+            release-operator-image, release-virtual-proxy-image, release-auth-proxy-image,
+            release-import-job-image, release-metadata-broker-image]
     permissions:
       contents: read
       packages: write
