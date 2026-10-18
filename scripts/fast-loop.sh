@@ -2,13 +2,13 @@
 # =============================================================================
 # Fast E2E iteration loop.
 #
-# Rebuilds ONLY the operator image, loads it into the k3d test cluster, force-
-# redeploys the operator, cleans stale e2e namespaces, then runs a slice of the
-# E2E suite. The import-job image is rebuilt + imported every run (the operator
-# falls back to a nonexistent ghcr.io tag without it — Import tests hang in
-# ErrImagePull otherwise). Other sidecars (virtual-proxy, metadata-broker) are
-# assumed unchanged and already loaded — rebuild them via scripts/run-tests.sh
-# e2e if you touched them.
+# Rebuilds ONLY the operator image, loads it into the test cluster (k3d or
+# Apple 'container'), force-redeploys the operator, cleans stale e2e namespaces,
+# then runs a slice of the E2E suite. The import-job image is rebuilt + imported
+# every run (the operator falls back to a nonexistent ghcr.io tag without it —
+# Import tests hang in ErrImagePull otherwise). Other sidecars (virtual-proxy,
+# metadata-broker) are assumed unchanged and already loaded — rebuild them via
+# scripts/run-tests.sh e2e if you touched them.
 #
 # Usage:
 #   scripts/fast-loop.sh                     # redeploy + run HostedRepository slice
@@ -37,6 +37,11 @@ export OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE:-maven-operator-system}"
 export OPERATOR_IMAGE="${OPERATOR_IMAGE:-maven-operator:dev}"
 export VIRTUAL_PROXY_IMAGE="${VIRTUAL_PROXY_IMAGE:-maven-virtual-proxy:dev}"
 
+# Detect which Kubernetes runtime is available (k3d, Apple 'container', or
+# external KUBECONFIG) — mirrors run-tests.sh so all cluster_* functions work.
+# This sets CLUSTER_TYPE which is required by lib/cluster.sh.
+_detect_runtime
+
 FILTER="FullyQualifiedName~HostedRepositoryE2ETests"
 RUN_TESTS=true
 
@@ -49,12 +54,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Kubeconfig ────────────────────────────────────────────────────────────────
-export KUBECONFIG="${KUBECONFIG:-${REPO_ROOT}/.tmp/kubeconfig-${K3D_CLUSTER_NAME}.yaml}"
-if [[ ! -f "${KUBECONFIG}" ]]; then
-  log_warn "Kubeconfig ${KUBECONFIG} missing — regenerating from k3d…"
-  k3d get-kubeconfig --cluster "${K3D_CLUSTER_NAME}" > "${KUBECONFIG}"
+# ── Ensure cluster is up (if no external KUBECONFIG was provided) ─────────────
+# cluster_init respects CLUSTER_TYPE: creates a k3d or container-cluster as needed.
+# For external clusters we skip — the user's KUBECONFIG is already set.
+if [[ "${CLUSTER_TYPE:-}" != "external" ]]; then
+  cluster_init
 fi
+export KUBECONFIG="$(cluster_get_kubeconfig)"
 log_info "Using kubeconfig: ${KUBECONFIG}"
 
 # ── Quick compile check before the slow docker build ──────────────────────────
