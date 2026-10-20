@@ -217,7 +217,10 @@ cluster_preload_sidecar_images() {
       continue
     fi
     # Import into k3d — fail the function (not just warn) if it doesn't work.
-    if ! "${CONTAINER_RUNTIME}" save -o - "${img}" \
+    # Use _container_save_to_stdout to ensure Docker archive format (required
+    # by k3d image import); podman's OCI default would fail silently under
+    # 'set -euo pipefail' — see commit history for why this was fatalised.
+    if ! _container_save_to_stdout "${img}" \
         | k3d image import -c "${K3D_CLUSTER_NAME}"; then
       log_error "  Failed to import '${img}' into cluster containerd."
       _failed_count=$((_failed_count + 1))
@@ -251,6 +254,19 @@ _container_save() {
     podman save --format docker-archive -o "${_out}" "${_img}"
   else
     docker save -o "${_out}" "${_img}"
+  fi
+}
+
+# Output a container image as a Docker-format tarball to stdout.
+# Used by 'k3d image import' which reads the tar from stdin.
+# podman save defaults to OCI format — must add --format docker-archive.
+# Usage: _container_save_to_stdout <image_tag>
+_container_save_to_stdout() {
+  local _img="$1"
+  if [[ "${CONTAINER_RUNTIME}" == "podman" ]]; then
+    podman save --format docker-archive - "${_img}"
+  else
+    docker save - "${_img}"
   fi
 }
 
