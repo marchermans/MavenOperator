@@ -221,7 +221,7 @@ cluster_preload_sidecar_images() {
     # by k3d image import); podman's OCI default would fail silently under
     # 'set -euo pipefail' — see commit history for why this was fatalised.
     if ! _container_save_to_stdout "${img}" \
-        | k3d image import -c "${K3D_CLUSTER_NAME}"; then
+        | k3d image import -c "${K3D_CLUSTER_NAME}" -; then
       log_error "  Failed to import '${img}' into cluster containerd."
       _failed_count=$((_failed_count + 1))
       _failed_images+=("${img}")
