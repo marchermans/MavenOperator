@@ -216,17 +216,20 @@ cluster_preload_sidecar_images() {
       _failed_images+=("${img}")
       continue
     fi
-    # Import into k3d — fail the function (not just warn) if it doesn't work.
-    # Use _container_save_to_stdout to ensure Docker archive format (required
-    # by k3d image import); podman's OCI default would fail silently under
-    # 'set -euo pipefail' — see commit history for why this was fatalised.
-    if ! _container_save_to_stdout "${img}" \
-        | k3d image import -c "${K3D_CLUSTER_NAME}" -; then
+    # Import into k3d — save to a temp tar file (Docker format, required by
+    # k3d's containerd), then import the file.  Piping to k3d image import via
+    # stdin is unreliable across versions; writing to a file and passing the
+    # path is the stable approach.
+    _tmp_tar="$(mktemp --suffix=.tar)"
+    _container_save "${img}" "${_tmp_tar}"
+    if ! k3d image import -c "${K3D_CLUSTER_NAME}" "${_tmp_tar}"; then
       log_error "  Failed to import '${img}' into cluster containerd."
+      rm -f "${_tmp_tar}"
       _failed_count=$((_failed_count + 1))
       _failed_images+=("${img}")
       continue
     fi
+    rm -f "${_tmp_tar}"
     log_ok "  ${img} pulled and imported."
   done
 
