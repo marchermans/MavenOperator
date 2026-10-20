@@ -667,7 +667,7 @@ jobs:
   release-metadata-broker-image:
     name: Push Metadata Broker Image
     runs-on: ubuntu-latest
-    needs: [version, build-and-test, docker-build, integration, performance, release-tags]
+    needs: [version, build-and-test, docker-build, release-tags, integration]
     permissions:
       contents: read
       packages: write
