@@ -28,6 +28,14 @@ public sealed class UpstreamSpec
     public string? CachePvcSize { get; set; }
 
     /// <summary>
+    /// Storage class name for a generic ephemeral volume used as the NGINX proxy cache.
+    /// When set, Kubernetes creates an ephemeral volume (inline PVC) backed by the
+    /// specified storage class — the class's replica count determines durability.
+    /// Example: "longhorn-replica-2". Mutually exclusive with CachePvcSize.
+    /// </summary>
+    public string? CacheStorageClass { get; set; }
+
+    /// <summary>
     /// Upload forwarding configuration for Proxy repositories.
     /// When enabled, PUT/DELETE requests are forwarded to the upstream using fixed credentials.
     /// Defaults to disabled (read-only cache).
