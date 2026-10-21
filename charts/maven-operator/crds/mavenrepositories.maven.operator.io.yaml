@@ -103,6 +103,9 @@ spec:
                     cachePvcSize:
                       type: string
                       nullable: true
+                    cacheStorageClass:
+                      type: string
+                      nullable: true
                     auth:
                       type: object
                       nullable: true

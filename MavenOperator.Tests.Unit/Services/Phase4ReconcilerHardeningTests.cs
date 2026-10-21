@@ -74,6 +74,52 @@ public sealed class Phase4ReconcilerHardeningTests
     }
 
     [Fact]
+    public async Task ProxyReconciler_SetsEphemeralCacheCondition_WhenCacheStorageClassIsSet()
+    {
+        var resources = Substitute.For<IKubernetesResourceManager>();
+        var k8s       = Substitute.For<KubeOps.KubernetesClient.IKubernetesClient>();
+        var events    = Substitute.For<IKubernetesEventService>();
+        var nginx     = new NginxConfigRenderer();
+
+        var reconciler = new ProxyRepositoryReconciler(
+            k8s, resources, new HtpasswdService(), Substitute.For<IRoleBasedHtpasswdService>(),
+            Substitute.For<IAuthProxyConfigRenderer>(), nginx, events,
+            NullLogger<ProxyRepositoryReconciler>.Instance);
+
+        const string storageClass = "longhorn-replica-2";
+        var entity = BuildEphemeralProxyEntity("proxy-repo", "ns", storageClass);
+
+        resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
+            .Returns(new k8s.Models.V1Secret());
+        resources.EnsureConfigMapAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
+            .Returns(new k8s.Models.V1ConfigMap());
+        resources.EnsureDeploymentAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<k8s.Models.V1PodSpec>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(new k8s.Models.V1Deployment());
+        resources.EnsureServiceAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new k8s.Models.V1Service());
+        resources.EnsurePodMonitorAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<MetricsSpec>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(false));
+
+        await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        // No PVC should have been requested (ephemeral volumes are inline in the Pod spec)
+        await resources.DidNotReceive().EnsurePvcAsync(
+            Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+
+        // CacheReady condition should be set with EphemeralCache reason
+        var cacheCondition = entity.Status.Conditions.FirstOrDefault(c => c.Type == "CacheReady");
+        cacheCondition.ShouldNotBeNull();
+        cacheCondition!.Status.ShouldBe("True");
+        cacheCondition.Reason.ShouldBe("EphemeralCache");
+    }
+
+    [Fact]
     public async Task ProxyReconciler_CreatesCachePvc_WhenCachePvcSizeIsSet()
     {
         var resources = Substitute.For<IKubernetesResourceManager>();
@@ -170,6 +216,27 @@ public sealed class Phase4ReconcilerHardeningTests
                 {
                     Url          = "https://repo1.maven.org/maven2",
                     CachePvcSize = cachePvcSize,
+                },
+                Auth = new AuthSpec
+                {
+                    Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                },
+            },
+        };
+
+    private static MavenRepositoryV1Alpha1 BuildEphemeralProxyEntity(
+        string name, string ns, string cacheStorageClass) =>
+        new()
+        {
+            Metadata = new k8s.Models.V1ObjectMeta { Name = name, NamespaceProperty = ns },
+            Spec = new MavenRepositorySpec
+            {
+                Type     = RepositoryType.Proxy,
+                Upstream = new UpstreamSpec
+                {
+                    Url              = "https://repo1.maven.org/maven2",
+                    CacheStorageClass = cacheStorageClass,
                 },
                 Auth = new AuthSpec
                 {

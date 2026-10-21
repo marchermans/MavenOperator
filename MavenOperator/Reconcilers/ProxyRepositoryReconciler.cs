@@ -15,12 +15,14 @@ namespace MavenOperator.Reconcilers;
 /// Steps (all idempotent):
 ///   1. EnsureDownloadHtpasswdSecret
 ///   2. EnsureNginxConfigMap          (proxy_pass template with upstream credentials)
-///   3. EnsureDeployment              (NGINX with emptyDir cache volume)
+///   3. EnsureDeployment              (NGINX with cache volume)
 ///   4. EnsureService
 ///   5. EnsureIngress (when enabled)
 ///
-/// No PVC is created — the proxy cache uses an emptyDir. An optional PVC cache
-/// is deferred to Phase 4 hardening.
+/// Cache volume options (mutually exclusive, evaluated top-to-bottom):
+///   1. CacheStorageClass → generic ephemeral volume (backed by the specified StorageClass)
+///   2. CachePvcSize    → persistent PVC (ReadWriteMany)
+///   3. Neither set     → emptyDir (ephemeral, no storage guarantees)
 /// </summary>
 public sealed class ProxyRepositoryReconciler(
     IKubernetesClient k8s,
@@ -83,12 +85,22 @@ public sealed class ProxyRepositoryReconciler(
         await events.PublishAsync(entity, "AuthUpdated",
             $"htpasswd rebuilt: {spec.Auth.Download.Users.Count} download user(s)", ct: ct);
 
-        // 1b ── Persistent proxy cache PVC (optional) ──────────────────────────
-        var usePvcCache = !string.IsNullOrWhiteSpace(spec.Upstream.CachePvcSize);
-        if (usePvcCache)
+        // 1b ── Proxy cache volume (3 tiers, mutually exclusive) ───────────────
+        var usePvcCache  = !string.IsNullOrWhiteSpace(spec.Upstream.CachePvcSize);
+        var useEphemeral = !string.IsNullOrWhiteSpace(spec.Upstream.CacheStorageClass);
+
+        if (useEphemeral)
+        {
+            // Generic ephemeral volume: Kubernetes creates an inline PVC backed by
+            // the specified storage class. Lifecycle follows the pod — when the pod
+            // is deleted the volume is reclaimed.
+            entity.Status.SetCondition("CacheReady", isTrue: true,
+                reason: "EphemeralCache", message: $"Using ephemeral cache volume (storageClass={spec.Upstream.CacheStorageClass})");
+        }
+        else if (usePvcCache)
         {
             var cachePvcName = $"{name}-cache-pvc";
-            //Hard code the access mode to ReadWriteMany to support HA mode running.
+            // Hard code the access mode to ReadWriteMany to support HA mode running.
             await resources.EnsurePvcAsync(entity, cachePvcName, spec.Upstream.CachePvcSize!, "ReadWriteMany",
                 storageClassName: null, setOwnerReference: true, ct: ct);
             entity.Status.SetCondition("CacheReady", isTrue: true,
@@ -237,7 +249,7 @@ public sealed class ProxyRepositoryReconciler(
         // 4 ── Deployment ──────────────────────────────────────────────────────
         var configHash = ComputeHash(nginxConfig + downloadHtpasswd + authProxyConfigJson);
         var deployName = $"{name}-nginx";
-        var podSpec    = BuildPodSpec(name, spec, usePvcCache, useAuthProxy, uploadNeedsHtpasswd);
+        var podSpec    = BuildPodSpec(name, spec, usePvcCache, useEphemeral, useAuthProxy, uploadNeedsHtpasswd);
 
         await resources.EnsureDeploymentAsync(entity, deployName, configHash, podSpec, spec.Replicas ?? 1, ct, topologySpreadConstraint: spec.TopologySpreadConstraint);
 
@@ -352,10 +364,11 @@ public sealed class ProxyRepositoryReconciler(
             await resources.DeleteResourceIfExistsAsync<V1ConfigMap>($"{name}-auth-proxy-cm", ns, ct);
         }
 
-        // ── Proxy cache PVC: delete if persistent cache was removed from spec ─
+        // ── Proxy cache PVC: delete if a persistent (PVC) cache was removed from spec ─
         // The cache PVC was created with an owner reference, so it would survive
-        // only until the CRD is deleted, but if cachePvcSize is removed from the spec
+        // only until the CRD is deleted, but if CachePvcSize is removed from the spec
         // we clean it up eagerly because the pod no longer mounts it.
+        // (Ephemeral volumes do not create a PVC, so no cleanup is needed for them.)
         if (!usePvcCache)
         {
             await resources.DeletePvcIfExistsAsync($"{name}-cache-pvc", ns, ct);
@@ -489,7 +502,7 @@ public sealed class ProxyRepositoryReconciler(
         return false;
     }
 
-    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useAuthProxy = false, bool uploadNeedsHtpasswd = false)
+    private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool usePvcCache = false, bool useEphemeral = false, bool useAuthProxy = false, bool uploadNeedsHtpasswd = false)
     {
         var res = spec.Resources is not null
             ? new V1ResourceRequirements { Requests = spec.Resources.Requests, Limits = spec.Resources.Limits }
@@ -508,9 +521,26 @@ public sealed class ProxyRepositoryReconciler(
 
         var volumes = new List<V1Volume>
         {
-            usePvcCache
-                ? new V1Volume { Name = "nginx-cache", PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource { ClaimName = $"{name}-cache-pvc" } }
-                : new V1Volume { Name = "nginx-cache", EmptyDir = new V1EmptyDirVolumeSource() },
+            useEphemeral
+                ? new V1Volume
+                {
+                    Name = "nginx-cache",
+                    Ephemeral = new V1EphemeralVolumeSource
+                    {
+                        VolumeClaimTemplate = new V1PersistentVolumeClaimTemplate
+                        {
+                            Spec = new V1PersistentVolumeClaimSpec
+                            {
+                                StorageClassName = spec.Upstream!.CacheStorageClass,
+                                AccessModes    = new List<string> { "ReadWriteOnce" },
+                                Resources      = new V1VolumeResourceRequirements { Requests = new Dictionary<string, ResourceQuantity> { ["storage"] = new(spec.Upstream.CachePvcSize ?? "50Gi") } },
+                            },
+                        },
+                    },
+                }
+                : usePvcCache
+                    ? new V1Volume { Name = "nginx-cache", PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource { ClaimName = $"{name}-cache-pvc" } }
+                    : new V1Volume { Name = "nginx-cache", EmptyDir = new V1EmptyDirVolumeSource() },
             new() { Name = "nginx-conf",    ConfigMap = new V1ConfigMapVolumeSource { Name = $"{name}-nginx-cm" } },
             new() { Name = "download-auth", Secret    = new V1SecretVolumeSource { SecretName = $"{name}-download-htpasswd", Optional = true } },
         };
