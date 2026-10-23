@@ -56,7 +56,7 @@ public sealed class HtpasswdServiceTests
     [Fact]
     public void BuildHtpasswd_EmptyCredentials_ReturnsEmptyString()
     {
-        var result = _sut.BuildHtpasswd([]);
+        var result = _sut.BuildHtpasswd(Array.Empty<(string, string)>());
         result.ShouldBe(string.Empty);
     }
     [Fact]
@@ -185,5 +185,108 @@ public sealed class HtpasswdServiceTests
         var line   = updated.Split('\n')[0];
         line.ShouldStartWith("deployer:");
         line.Split(':')[1].ShouldBe(original.Split(':')[1]); // identical salt/hash
+    }
+
+    // ── Pre-hashed entries (bcryptHash passthrough) ───────────────────────────
+
+    [Fact]
+    public void BuildHtpasswd_PrehashedEntry_WrittenVerbatim_NoRehashing()
+    {
+        var hash   = BCrypt.Net.BCrypt.HashPassword("s3cr3t", 10);
+        var result = _sut.BuildHtpasswd([CredentialEntry.FromBcryptHash("deployer", hash)]);
+
+        // The exact supplied hash must appear in the file — no re-salting.
+        result.ShouldBe($"deployer:{hash}");
+    }
+
+    [Fact]
+    public void BuildHtpasswd_PrehashedLine_IsVerifiable_ByBcrypt()
+    {
+        var hash   = BCrypt.Net.BCrypt.HashPassword("correcthorsebatterystaple", 10);
+        var result = _sut.BuildHtpasswd([CredentialEntry.FromBcryptHash("user", hash)]);
+
+        // Proves the passthrough line is a real bcrypt hash NGINX can verify.
+        BCrypt.Net.BCrypt.Verify("correcthorsebatterystaple", result.Split(':')[1]).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void BuildHtpasswd_MixedPlaintextAndPrehashed_BuildsBothLineKinds()
+    {
+        var hash = BCrypt.Net.BCrypt.HashPassword("pre-hashed-pw", 10);
+
+        var result = _sut.BuildHtpasswd([
+            CredentialEntry.FromPlainText("plain-user", "plain-pw"),
+            CredentialEntry.FromBcryptHash("hashed-user", hash),
+        ]);
+        var lines  = result.Split('\n');
+
+        lines.Length.ShouldBe(2);
+        // Plain-text user is freshly hashed by the operator.
+        BCrypt.Net.BCrypt.Verify("plain-pw", lines[0].Split(':')[1]).ShouldBeTrue();
+        // Pre-hashed entry passes through verbatim.
+        lines[1].ShouldBe($"hashed-user:{hash}");
+    }
+
+    [Fact]
+    public void BuildHtpasswd_Throws_OnDuplicateUsername_AcrossModes()
+    {
+        var hash = BCrypt.Net.BCrypt.HashPassword("pw", 10);
+
+        Should.Throw<ArgumentException>(() => _sut.BuildHtpasswd([
+            CredentialEntry.FromPlainText("deployer", "plain-pw"),
+            CredentialEntry.FromBcryptHash("deployer", hash),
+        ])).Message.ShouldContain("deployer");
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_PrehashedUnchanged_ReturnsIdenticalBytes()
+    {
+        var hash   = BCrypt.Net.BCrypt.HashPassword("pw", 10);
+        var first  = _sut.BuildHtpasswd([CredentialEntry.FromBcryptHash("user", hash)]);
+
+        // Re-reconciling with the same pre-hashed entry must not change a single byte.
+        var second = _sut.BuildHtpasswdStable([CredentialEntry.FromBcryptHash("user", hash)], first);
+
+        second.ShouldBe(first);
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_PrehashedChanged_ReplacesLineWithNewHash()
+    {
+        var oldHash = BCrypt.Net.BCrypt.HashPassword("old-pw", 10);
+        var newHash = BCrypt.Net.BCrypt.HashPassword("new-pw", 10);
+
+        var original = _sut.BuildHtpasswd([CredentialEntry.FromBcryptHash("user", oldHash)]);
+        var updated  = _sut.BuildHtpasswdStable([CredentialEntry.FromBcryptHash("user", newHash)], original);
+
+        updated.ShouldBe($"user:{newHash}");
+    }
+
+    [Fact]
+    public void BuildHtpasswdStable_MixedModes_KeepsBothGuarantees()
+    {
+        var prehash = BCrypt.Net.BCrypt.HashPassword("pre-hashed-pw", 10);
+        var entries = new[]
+        {
+            CredentialEntry.FromPlainText("plain-user", "plain-pw"),
+            CredentialEntry.FromBcryptHash("hashed-user", prehash),
+        };
+
+        // First build, then a stable rebuild with identical input — must be byte-identical.
+        var first  = _sut.BuildHtpasswd(entries);
+        var second = _sut.BuildHtpasswdStable(entries, first);
+        second.ShouldBe(first);
+
+        // Now change both: the plain-text user gets re-hashed (verifiable against the new
+        // password), the pre-hashed user swaps to the newly supplied hash verbatim.
+        var changedHash = BCrypt.Net.BCrypt.HashPassword("changed-pre-hash", 10);
+        var updated     = _sut.BuildHtpasswdStable([
+            CredentialEntry.FromPlainText("plain-user", "CHANGED"),
+            CredentialEntry.FromBcryptHash("hashed-user", changedHash),
+        ], second);
+
+        var lines = updated.Split('\n');
+        BCrypt.Net.BCrypt.Verify("CHANGED", lines[0].Split(':')[1]).ShouldBeTrue();
+        lines[1].ShouldBe($"hashed-user:{changedHash}");
     }
 }

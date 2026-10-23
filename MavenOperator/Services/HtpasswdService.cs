@@ -23,16 +23,20 @@ public sealed class HtpasswdService : IHtpasswdService
 
     /// <inheritdoc/>
     public string BuildHtpasswd(IEnumerable<(string Username, string Password)> credentials)
+        => BuildHtpasswd(credentials.Select(c => CredentialEntry.FromPlainText(c.Username, c.Password)));
+
+    /// <inheritdoc/>
+    public string BuildHtpasswd(IEnumerable<CredentialEntry> credentials)
     {
         ArgumentNullException.ThrowIfNull(credentials);
 
         var lines = new List<string>();
         var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (username, password) in credentials)
+        foreach (var entry in credentials)
         {
-            Validate(username, password, credentials, seen);
-            lines.Add(HashPassword(username, password));
+            Validate(entry, seen);
+            lines.Add(RenderLine(entry));
         }
 
         return string.Join('\n', lines);
@@ -42,6 +46,12 @@ public sealed class HtpasswdService : IHtpasswdService
     public string BuildHtpasswdStable(
         IEnumerable<(string Username, string Password)> credentials,
         string? existingContent)
+        => BuildHtpasswdStable(credentials.Select(c => CredentialEntry.FromPlainText(c.Username, c.Password)), existingContent);
+
+    /// <inheritdoc/>
+    public string BuildHtpasswdStable(
+        IEnumerable<CredentialEntry> credentials,
+        string? existingContent)
     {
         ArgumentNullException.ThrowIfNull(credentials);
 
@@ -49,41 +59,54 @@ public sealed class HtpasswdService : IHtpasswdService
         var lines = new List<string>();
         var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (username, password) in credentials)
+        foreach (var entry in credentials)
         {
-            Validate(username, password, credentials, seen);
+            Validate(entry, seen);
 
             // Reuse the previous hash when it still verifies against the current
             // password — bcrypt salts are random per call, so re-hashing would change
             // the file bytes (and thus the operator's config hash) on every reconcile.
-            if (previous.TryGetValue(username, out var previousHash)
-                && Verifies(password, previousHash))
+            // Pre-hashed entries pass through verbatim: we control no salt there, and
+            // identical input always produces identical output.
+            if (!entry.IsPrehashed &&
+                previous.TryGetValue(entry.Username, out var previousHash)
+                && Verifies(entry.Password!, previousHash))
             {
-                lines.Add($"{username}:{previousHash}");
+                lines.Add($"{entry.Username}:{previousHash}");
             }
             else
             {
-                lines.Add(HashPassword(username, password));
+                lines.Add(RenderLine(entry));
             }
         }
 
         return string.Join('\n', lines);
     }
 
+    /// <summary>Renders one htpasswd line: pre-hashed entries verbatim, plain-text users freshly bcrypt-hashed.</summary>
+    private string RenderLine(CredentialEntry entry) =>
+        entry.IsPrehashed ? $"{entry.Username}:{entry.BcryptHash}"
+                         : HashPassword(entry.Username, entry.Password!);
+
     private static void Validate(
-        string username,
-        string password,
-        IEnumerable<(string Username, string Password)> credentials,
+        CredentialEntry entry,
         HashSet<string> seen)
     {
-        if (string.IsNullOrWhiteSpace(username))
-            throw new ArgumentException("Username must not be blank.", nameof(credentials));
-        if (string.IsNullOrWhiteSpace(password))
-            throw new ArgumentException($"Password for user '{username}' must not be blank.", nameof(credentials));
-        if (!seen.Add(username))
+        ArgumentNullException.ThrowIfNull(entry);
+        if (string.IsNullOrWhiteSpace(entry.Username))
+            throw new ArgumentException("Username must not be blank.", nameof(entry));
+
+        // Factory methods guarantee exactly one of password/bcryptHash is present;
+        // re-check defensively so malformed entries can't slip through.
+        var hasPassword = !string.IsNullOrWhiteSpace(entry.Password);
+        var hasBcrypt   = !string.IsNullOrWhiteSpace(entry.BcryptHash);
+        if (hasPassword == hasBcrypt)
             throw new ArgumentException(
-                $"Duplicate username '{username}' detected. Usernames must be unique within a policy.",
-                nameof(credentials));
+                $"Entry for user '{entry.Username}' must contain exactly one of password or bcryptHash.", nameof(entry));
+
+        if (!seen.Add(entry.Username))
+            throw new ArgumentException(
+                $"Duplicate username '{entry.Username}' detected. Usernames must be unique within a policy.");
     }
 
     /// <summary>

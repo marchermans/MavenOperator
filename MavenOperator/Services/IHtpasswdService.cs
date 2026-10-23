@@ -1,8 +1,9 @@
 namespace MavenOperator.Services;
 
 /// <summary>
-/// Generates htpasswd-formatted credential entries from plain-text username/password pairs.
-/// The operator owns all htpasswd files — users only supply username + password in Secrets.
+/// Generates htpasswd-formatted credential entries.
+/// The operator owns all htpasswd files — users supply username plus either a plain-text
+/// password (hashed by the operator) or a pre-hashed bcrypt hash (written verbatim) in Secrets.
 /// </summary>
 public interface IHtpasswdService
 {
@@ -23,6 +24,16 @@ public interface IHtpasswdService
     string BuildHtpasswd(IEnumerable<(string Username, string Password)> credentials);
 
     /// <summary>
+    /// Builds a complete htpasswd file content from resolved credential entries.
+    /// Plain-text-password users are bcrypt-hashed; pre-hashed entries are written verbatim
+    /// into the file (no re-hashing). Duplicate usernames are rejected by throwing
+    /// <see cref="ArgumentException"/>.
+    /// </summary>
+    /// <param name="credentials">Resolved credential entries.</param>
+    /// <returns>Multi-line string suitable for writing into an htpasswd file.</returns>
+    string BuildHtpasswd(IEnumerable<CredentialEntry> credentials);
+
+    /// <summary>
     /// Builds htpasswd content while reusing the existing bcrypt hashes for every user
     /// whose password is unchanged. BCrypt salts are random per hash call, so rebuilding
     /// from scratch changes the file bytes on every invocation — which churns the
@@ -36,6 +47,19 @@ public interface IHtpasswdService
     /// </param>
     string BuildHtpasswdStable(
         IEnumerable<(string Username, string Password)> credentials,
+        string? existingContent);
+
+    /// <summary>
+    /// Entry-based variant of <see cref="BuildHtpasswdStable"/> with the same byte-stability guarantee.
+    /// Plain-text-password users reuse their previous hash when it still verifies; pre-hashed
+    /// entries are written verbatim (they are inherently byte-stable).
+    /// </summary>
+    /// <param name="credentials">Resolved credential entries.</param>
+    /// <param name="existingContent">
+    /// Current file content (e.g. read from the htpasswd Secret), or null when none exists yet.
+    /// </param>
+    string BuildHtpasswdStable(
+        IEnumerable<CredentialEntry> credentials,
         string? existingContent);
 }
 

@@ -31,7 +31,8 @@ public sealed class AuthPolicySpec
     /// <summary>
     /// Credential users for this direction.
     /// Each entry references a Kubernetes Secret (same namespace) holding exactly one user:
-    /// "username" + "password".
+    /// "username" plus either "password" (plain-text, hashed by the operator with bcrypt)
+    /// or "bcryptHash" (pre-hashed bcrypt hash, written verbatim into htpasswd).
     /// All referenced users are compiled into this direction's htpasswd file.
     /// </summary>
     public List<UserRef> Users { get; set; } = [];
@@ -64,7 +65,8 @@ public enum AuthPolicy
 public sealed class UserRef
 {
     /// <summary>
-    /// Name of the Kubernetes Secret (in the same namespace) holding "username" + "password".
+    /// Name of the Kubernetes Secret (in the same namespace) holding "username" plus
+    /// either "password" (plain-text) or "bcryptHash" (pre-hashed bcrypt).
     /// </summary>
     public string SecretRef { get; set; } = "";
 

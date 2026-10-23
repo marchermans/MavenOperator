@@ -387,21 +387,20 @@ public sealed class ProxyRepositoryReconciler(
         if (policy.Policy == AuthPolicy.Anonymous || policy.Users.Count == 0)
             return string.Empty;
 
-        var credentials = new List<(string, string)>();
+        var credentials = new List<CredentialEntry>();
 
         foreach (var user in policy.Users.Where(u => !string.IsNullOrWhiteSpace(u.SecretRef)))
         {
             var secretRef = user.SecretRef;
             var secret = await k8s.GetAsync<V1Secret>(secretRef, ns, ct)
                 ?? throw new InvalidOperationException(
-                    $"Credential Secret '{secretRef}' not found in namespace '{ns}'.");
+                    $"Credential Secret '{secretRef}' not found in namespace '{ns}'. " +
+                    $"Create it with 'username' plus either 'password' or 'bcryptHash'.");
 
-            var username = GetSecretKey(secret, "username", secretRef);
-            var password = GetSecretKey(secret, "password", secretRef);
-            credentials.Add((username, password));
+            credentials.Add(CredentialEntryResolver.FromSecret(secret, secretRef));
         }
 
-        return htpasswd.BuildHtpasswd(credentials.DistinctBy(c => c.Item1));
+        return htpasswd.BuildHtpasswd(credentials.DistinctBy(e => e.Username));
     }
 
     /// <summary>

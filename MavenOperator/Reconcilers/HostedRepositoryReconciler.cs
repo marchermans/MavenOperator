@@ -245,8 +245,8 @@ public sealed class HostedRepositoryReconciler(
     }
 
     /// <summary>
-    /// Reads each credential Secret from the cluster, extracts username+password,
-    /// and returns a combined htpasswd file content.
+    /// Reads each credential Secret from the cluster, resolves users (plain-text password
+    /// or pre-hashed bcrypt hash) and returns a combined htpasswd file content.
     /// If the policy is Anonymous (no secretRefs), returns an empty string.
     /// </summary>
     private async Task<string> BuildHtpasswdAsync(
@@ -259,7 +259,7 @@ public sealed class HostedRepositoryReconciler(
         if (policy.Policy == AuthPolicy.Anonymous || policy.Users.Count == 0)
             return string.Empty;
 
-        var credentials = new List<(string, string)>();
+        var credentials = new List<CredentialEntry>();
 
         foreach (var user in policy.Users.Where(u => !string.IsNullOrWhiteSpace(u.SecretRef)))
         {
@@ -267,11 +267,9 @@ public sealed class HostedRepositoryReconciler(
             var secret = await k8s.GetAsync<k8s.Models.V1Secret>(secretRef, ns, ct)
                 ?? throw new InvalidOperationException(
                     $"Credential Secret '{secretRef}' not found in namespace '{ns}'. " +
-                    $"Create it with 'username' and 'password' keys.");
+                    $"Create it with 'username' plus either 'password' or 'bcryptHash'.");
 
-            var username = GetSecretKey(secret, "username", secretRef);
-            var password = GetSecretKey(secret, "password", secretRef);
-            credentials.Add((username, password));
+            credentials.Add(CredentialEntryResolver.FromSecret(secret, secretRef));
         }
 
         // Read the previously written htpasswd file so unchanged passwords keep their
@@ -286,17 +284,7 @@ public sealed class HostedRepositoryReconciler(
             existing = Encoding.UTF8.GetString(raw);
         }
 
-        return htpasswd.BuildHtpasswdStable(credentials.DistinctBy(c => c.Item1), existing);
-    }
-
-    private static string GetSecretKey(k8s.Models.V1Secret secret, string key, string secretName)
-    {
-        if (secret.Data?.TryGetValue(key, out var bytes) == true)
-            return Encoding.UTF8.GetString(bytes);
-
-        throw new InvalidOperationException(
-            $"Credential Secret '{secretName}' is missing the required key '{key}'. " +
-            $"Each credential Secret must have 'username' and 'password' keys.");
+        return htpasswd.BuildHtpasswdStable(credentials.DistinctBy(e => e.Username), existing);
     }
 
     private static V1PodSpec BuildPodSpec(string name, MavenRepositorySpec spec, bool useAuthProxy)

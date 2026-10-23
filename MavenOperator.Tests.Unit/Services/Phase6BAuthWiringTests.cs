@@ -196,6 +196,97 @@ public sealed class Phase6BAuthWiringTests
         capturedPodSpec!.Containers.Select(c => c.Name).ShouldContain("maven-auth-proxy");
     }
 
+    /// <summary>
+    /// End-to-end: a credential Secret carrying 'username' + 'bcryptHash' must end up in the
+    /// generated htpasswd file VERBATIM — the operator must not re-hash it. The second user
+    /// stays plain-text to prove both modes coexist in one reconcile.
+    /// </summary>
+    [Fact]
+    public async Task HostedReconciler_PrehashedBcryptSecret_IsWrittenVerbatimIntoHtpasswd()
+    {
+        var resources = Substitute.For<IKubernetesResourceManager>();
+        var k8s       = Substitute.For<IKubernetesClient>();
+        var events    = Substitute.For<IKubernetesEventService>();
+
+        var reconciler = new HostedRepositoryReconciler(
+            k8s,
+            resources,
+            new HtpasswdService(),
+            new RoleBasedHtpasswdService(new HtpasswdService()),
+            new AuthProxyConfigRenderer(),
+            new NginxConfigRenderer(),
+            events,
+            NullLogger<HostedRepositoryReconciler>.Instance);
+
+        var entity = BuildHostedEntityWithPhase6B("hosted-prehashed", "ns");
+
+        var prehashedHash = BCrypt.Net.BCrypt.HashPassword("externally-managed-pw", 10);
+
+        k8s.GetAsync<V1Secret>(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var secretName = (string)call.Args()[0]!;
+                return secretName switch
+                {
+                    "reader-secret"   => BuildPrehashedCredentialSecret("reader", prehashedHash),
+                    "deployer-secret" => BuildCredentialSecret("deployer", "deployer-pass"),
+                    _                 => null,
+                };
+            });
+
+        IDictionary<string, string>? downloadSecret = null;
+        IDictionary<string, string>? uploadSecret   = null;
+
+        resources.EnsurePvcAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new V1PersistentVolumeClaim());
+        resources.EnsureSecretAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                var name = ci.ArgAt<string>(1);
+                var data = ci.ArgAt<IDictionary<string, string>>(2);
+                if (name.EndsWith("download-htpasswd", StringComparison.Ordinal)) downloadSecret = data;
+                if (name.EndsWith("upload-htpasswd", StringComparison.Ordinal)) uploadSecret = data;
+                return new V1Secret();
+            });
+        resources.EnsureConfigMapAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<IDictionary<string, string>>(), Arg.Any<CancellationToken>())
+            .Returns(new V1ConfigMap());
+        resources.EnsureDeploymentAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<IReadOnlyDictionary<string, string>>(), Arg.Any<V1PodSpec>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(new V1Deployment());
+        resources.EnsureServiceWithPortsAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IList<V1ServicePort>>(), Arg.Any<CancellationToken>())
+            .Returns(new V1Service());
+        resources.EnsurePodMonitorAsync(Arg.Any<MavenRepositoryV1Alpha1>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<MetricsSpec>(), Arg.Any<CancellationToken>())
+            .Returns(false);
+
+        await reconciler.ReconcileAsync(entity, CancellationToken.None);
+
+        downloadSecret.ShouldNotBeNull();
+        uploadSecret.ShouldNotBeNull();
+
+        // The pre-hashed user's line must be byte-identical to the Secret's hash — no re-salting.
+        var readerLine = downloadSecret!["download.htpasswd"]
+            .Split('\n').Single(l => l.StartsWith("reader:", StringComparison.Ordinal));
+        readerLine.ShouldBe($"reader:{prehashedHash}");
+
+        // The plain-text user is still operator-hashed and verifiable.
+        var deployerLine = downloadSecret["download.htpasswd"]
+            .Split('\n').Single(l => l.StartsWith("deployer:", StringComparison.Ordinal));
+        BCrypt.Net.BCrypt.Verify("deployer-pass", deployerLine.Split(':')[1]).ShouldBeTrue();
+
+        // Upload file contains only the deployer (reader is not in the upload policy).
+        uploadSecret!["upload.htpasswd"].ShouldContain("deployer:");
+        uploadSecret["upload.htpasswd"].ShouldNotContain("reader:");
+    }
+
+    private static V1Secret BuildPrehashedCredentialSecret(string username, string bcryptHash) =>
+        new()
+        {
+            Data = new Dictionary<string, byte[]>
+            {
+                ["username"]   = System.Text.Encoding.UTF8.GetBytes(username),
+                ["bcryptHash"] = System.Text.Encoding.UTF8.GetBytes(bcryptHash),
+            },
+        };
+
     private static MavenRepositoryV1Alpha1 BuildHostedEntityWithPhase6B(string name, string ns) =>
         new()
         {
