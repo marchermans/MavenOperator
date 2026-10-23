@@ -11,7 +11,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 builder.Logging.ClearProviders();
-builder.Logging.AddConsole();
+builder.Logging.AddJsonConsole().SetMinimumLevel(LogLevel.Information);
 
 
 // ── KubeOps operator ─────────────────────────────────────────────────────────

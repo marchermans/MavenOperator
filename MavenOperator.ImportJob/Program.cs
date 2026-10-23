@@ -11,7 +11,7 @@ using System.Text.Json;
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 var services = new ServiceCollection();
-services.AddLogging(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+services.AddLogging(b => b.AddJsonConsole().SetMinimumLevel(LogLevel.Information));
 services.AddHttpClient("reposilite").AddTransientHttpErrorPolicy(p =>
     p.WaitAndRetryAsync(3, i => TimeSpan.FromSeconds(Math.Pow(2, i))));
 services.AddHttpClient("jfrog").AddTransientHttpErrorPolicy(p =>

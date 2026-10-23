@@ -2,6 +2,9 @@ using MavenOperator.AuthProxy;
 using MavenOperator.AuthProxy.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+// ── Logging ───────────────────────────────────────────────────────────────────
+builder.Logging.ClearProviders();
+builder.Logging.AddJsonConsole().SetMinimumLevel(LogLevel.Information);
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 // Load from /etc/maven-auth/config.json (mounted ConfigMap) with hot-reload.

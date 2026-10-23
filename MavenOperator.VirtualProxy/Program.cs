@@ -5,7 +5,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 builder.Logging.ClearProviders();
-builder.Logging.AddConsole();
+builder.Logging.AddJsonConsole().SetMinimumLevel(LogLevel.Information);
 
 // ── Configuration — mounted ConfigMap at /app/config/appsettings.json ─────────
 builder.Configuration.AddJsonFile("/app/config/appsettings.json", optional: false);

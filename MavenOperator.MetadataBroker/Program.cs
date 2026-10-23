@@ -30,7 +30,10 @@ if (args.Length > 0 && args[0] == "--health-probe")
 }
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Logging.SetMinimumLevel(LogLevel.Information);
+// ── Logging ───────────────────────────────────────────────────────────────────
+builder.Logging.ClearProviders();
+builder.Logging.AddJsonConsole().SetMinimumLevel(LogLevel.Information);
+
 builder.WebHost.UseUrls(
     Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://127.0.0.1:8091");
 
