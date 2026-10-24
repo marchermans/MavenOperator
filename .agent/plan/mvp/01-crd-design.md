@@ -25,6 +25,9 @@ spec:
   upstream:
     url: https://repo1.maven.org/maven2
     cacheTtl: 1d                 # optional, default 1d
+    groupFilters:                # optional (Proxy only) — allow-list of PCRE regexes on the
+      - "org/apache"             #   repository-relative artifact path; unmatched paths → 403.
+      - "^com[./]example"
     auth:                        # optional — single upstream credential
       secretRef: maven-central-credentials
   # ── Members (only for Virtual) ────────────────────────────────────
@@ -120,6 +123,7 @@ status:
 ## Validation Rules (CEL)
 - `type == "Hosted"` → `storage` required, `virtual` forbidden.
 - `type == "Proxy"` → `upstream.url` required, `storage` and `virtual` forbidden.
+- `upstream.groupFilters` (when present) must be non-empty and contain only non-empty strings.
 - `type == "Virtual"` → `virtual.members` required (min 1), `storage` and `upstream` forbidden.
 - `virtual.members` must not contain the CRD's own name (loop prevention).
 - `auth.download.policy == "Authenticated"` → `auth.download.secretRefs` must be non-empty.

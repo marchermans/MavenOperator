@@ -41,7 +41,8 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
         string name,
         string upstreamUrl = "https://repo1.maven.org/maven2",
         AuthPolicy download = AuthPolicy.Anonymous,
-        string? upstreamSecretRef = null)
+        string? upstreamSecretRef = null,
+        List<string>? groupFilters = null)
     {
         var entity = new MavenRepositoryV1Alpha1
         {
@@ -57,9 +58,10 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
                 Type     = RepositoryType.Proxy,
                 Upstream = new()
                 {
-                    Url      = upstreamUrl,
-                    CacheTtl = "1d",
-                    Auth     = upstreamSecretRef is null ? null : new() { SecretRef = upstreamSecretRef },
+                    Url          = upstreamUrl,
+                    CacheTtl     = "1d",
+                    Auth         = upstreamSecretRef is null ? null : new() { SecretRef = upstreamSecretRef },
+                    GroupFilters = groupFilters,
                 },
                 Auth = new()
                 {
@@ -294,6 +296,70 @@ public sealed class ProxyRepositoryReconcilerTests(ClusterFixture cluster)
         var config = cm!.Data!["default.conf"];
         config.ShouldContain("proxy_set_header Authorization");
         config.ShouldContain("Basic ");  // base64-encoded header
+    }
+
+    // ── Group filters (upstream.groupFilters) ───────────────────────────────
+
+    [IntegrationFact]
+    public async Task Reconcile_WithGroupFilters_ConfigMapContainsRegexLocationAnd403Fallback()
+    {
+        var name   = $"int-px-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, groupFilters: ["org/apache", "com/example.*"]);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var cm = await cluster.Client.GetAsync<V1ConfigMap>(
+            $"{name}-nginx-cm", cluster.Namespace, CancellationToken.None);
+
+        cm.ShouldNotBeNull();
+        var config = cm!.Data!["default.conf"];
+
+        // The repository location becomes a regex allow-list anchored at the prefix.
+        config.ShouldContain($"location ~ ^/repository/{name}/(?:(?:org/apache)|(?:com/example.*)) {{");
+        // Everything else under the prefix is denied with 403 via a plain prefix fallback
+        // (NGINX checks regex locations before prefix locations).
+        config.ShouldContain("return 403");
+        config.ShouldContain($"location /repository/{name}/ {{");
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_WithGroupFilters_DeploymentStillCreated()
+    {
+        var name   = $"int-px-{Guid.NewGuid().ToString("N")[..6]}";
+        var entity = await BuildEntityAsync(name, groupFilters: ["org/apache"]);
+
+        await BuildReconciler().ReconcileAsync(entity, CancellationToken.None);
+
+        var deploy = await cluster.Client.GetAsync<V1Deployment>(
+            $"{name}-nginx", cluster.Namespace, CancellationToken.None);
+        deploy.ShouldNotBeNull();
+    }
+
+    [IntegrationFact]
+    public async Task Reconcile_WithInvalidGroupFilterPattern_Throws()
+    {
+        // Build an in-memory entity that bypasses API validation — the CRD CEL rules catch
+        // empty patterns at admission, but malformed regexes need operator-side rejection.
+        var entity = new MavenRepositoryV1Alpha1
+        {
+            ApiVersion = "maven.operator.io/v1alpha1",
+            Kind       = "MavenRepository",
+            Metadata   = new()
+            {
+                Name              = $"int-px-{Guid.NewGuid().ToString("N")[..6]}",
+                NamespaceProperty = cluster.Namespace,
+                Uid               = Guid.NewGuid().ToString(),
+            },
+            Spec = new()
+            {
+                Type     = RepositoryType.Proxy,
+                Upstream = new() { Url = "https://repo1.maven.org/maven2", GroupFilters = ["("] },
+                Auth     = new(),
+            },
+        };
+
+        await Should.ThrowAsync<ArgumentException>(
+            () => BuildReconciler().ReconcileAsync(entity, CancellationToken.None));
     }
 
     // ── Idempotency ───────────────────────────────────────────────────────

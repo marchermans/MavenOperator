@@ -2,7 +2,13 @@
 ## Rendered by NginxConfigRenderer using Scriban.
 ## Variables: name, var_name, download_policy, upstream_scheme_host, upstream_path, cache_ttl, upstream_auth_header,
 ##            metrics_enabled, stub_status_port, download_auth_proxy_enabled,
-##            path_prefix, location_path_prefix, path_prefix_regex
+##            path_prefix, location_path_prefix, location_directive, group_filter_regex, path_prefix_regex
+##
+## 'location_directive'  — the repository location directive: a plain prefix (e.g. "/repository/proxy")
+##                          or "~ <regex>" when group filters are configured.
+## 'group_filter_regex'  — empty string when no group filters are set; otherwise the anchored
+##                          pattern that selects allowed artifact paths, and signals the renderer
+##                          to emit a 403 fallback location for everything else under the prefix.
 ##
 ## 'name'     — the Kubernetes resource name, used in URL paths and auth realm strings.
 ##              May contain hyphens (e.g. "my-proxy").
@@ -162,7 +168,16 @@ server {
     }
     {{ end -}}
 
+    {{ if group_filter_regex != "" -}}
+    # ── Group filter (allow-list of artifact groups) ──────────────────────────
+    # Only artifacts whose repository-relative path matches one of the configured
+    # group filters pass through this proxy. NGINX checks regex locations before
+    # prefix locations, so everything NOT matched by this location falls through
+    # to the 403 fallback below.
+    location ~ {{ group_filter_regex }} {
+    {{ else -}}
     location {{ location_path_prefix }} {
+    {{ end -}}
         # ── Download auth (GET/HEAD) ────────────────────────────────────────
         {{ if download_auth_proxy_enabled -}}
         auth_request /auth/validate;
@@ -247,5 +262,11 @@ server {
         {{ end -}}
     }
 
-
+    {{ if group_filter_regex != "" -}}
+    # Group filter fallback: every request under this repository that did NOT match an
+    # allowed-group pattern is denied here instead of being forwarded to the upstream.
+    location {{ location_path_prefix }} {
+        return 403 "artifact not served by this proxy: does not match any configured group filter\n";
+    }
+    {{ end -}}
 }

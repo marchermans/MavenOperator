@@ -58,6 +58,12 @@ spec:
                 # Proxy upload enabled → upstreamCredentialsRef.name must be present.
                 - rule: "!has(self.upstream) || !has(self.upstream.upload) || !self.upstream.upload.enabled || self.upstream.upload.upstreamCredentialsRef.name != ''"
                   message: "spec.upstream.upload.upstreamCredentialsRef.name is required when proxy upload is enabled"
+                # Proxy group filters must contain at least one pattern when present.
+                - rule: "!has(self.upstream) || !has(self.upstream.groupFilters) || self.upstream.groupFilters.size() > 0"
+                  message: "spec.upstream.groupFilters must contain at least one pattern; omit the field to disable filtering"
+                # Each group filter entry must be a non-empty string.
+                - rule: "!has(self.upstream) || !has(self.upstream.groupFilters) || self.upstream.groupFilters.all(f, f != '')"
+                  message: "spec.upstream.groupFilters entries must not be empty strings"
               properties:
                 type:
                   type: string
@@ -106,6 +112,21 @@ spec:
                     cacheStorageClass:
                       type: string
                       nullable: true
+                    groupFilters:
+                      type: array
+                      nullable: true
+                      description: >
+                        Optional allow-list of group filters for Proxy repositories. Each entry is a
+                        PCRE2 regular expression matched against the repository-relative artifact path —
+                        the Maven coordinates part after the base URL prefix (e.g.
+                        "org/apache/maven/core/3.9.0"). Patterns are anchored at the start of that relative
+                        path and match as prefixes: an unanchored tail matches any continuation, so a group
+                        prefix like org.apache is written "org/apache" (group IDs use slashes for dots in URL
+                        paths). When set (non-empty), only artifacts matching at least one pattern are reachable
+                        through this proxy; all other requests under the repository prefix return HTTP 403
+                        instead of being forwarded to the upstream.
+                      items:
+                        type: string
                     auth:
                       type: object
                       nullable: true

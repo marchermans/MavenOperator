@@ -210,6 +210,12 @@ public sealed class ProxyRepositoryReconciler(
         }
 
         // 3 ── NGINX ConfigMap ─────────────────────────────────────────────────
+        var groupFilters = spec.Upstream.GroupFilters;
+        if (groupFilters is { Count: > 0 })
+            logger.LogInformation(
+                "[Proxy] '{Namespace}/{Name}' has {Count} group filter(s): {Patterns}",
+                ns, name, groupFilters.Count, string.Join(", ", groupFilters));
+
         var nginxConfig   = nginx.RenderProxy(
             name,
             spec.Auth.Download.Policy,
@@ -222,7 +228,8 @@ public sealed class ProxyRepositoryReconciler(
             uploadEnabled: uploadEnabled,
             uploadMode: uploadMode,
             uploadPolicy: uploadPolicy,
-            upstreamUploadAuthHeader: upstreamUploadAuthHeader);
+            upstreamUploadAuthHeader: upstreamUploadAuthHeader,
+            groupFilters: groupFilters);
 
         var configMapName = $"{name}-nginx-cm";
         await resources.EnsureConfigMapAsync(entity, configMapName,

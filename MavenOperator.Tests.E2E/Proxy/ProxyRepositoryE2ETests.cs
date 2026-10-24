@@ -4,7 +4,9 @@ using MavenOperator.Entities;
 using MavenOperator.Entities.Spec;
 using MavenOperator.Tests.E2E.Infrastructure;
 using Shouldly;
+using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 
 namespace MavenOperator.Tests.E2E.Proxy;
@@ -241,6 +243,123 @@ public sealed class ProxyRepositoryE2ETests(ProxyE2EFixture e2e)
 
         exitCode.ShouldBe(0,
             $"mvn dependency:resolve through proxy should succeed.\nOutput:\n{output}");
+    }
+
+    // ── Group filters (upstream.groupFilters) ────────────────────────────────
+
+    [E2EFact]
+    public async Task Http_GroupFilter_AllowedGroupProxied_DeniedGroupReturns403()
+    {
+        const string ns = "maven-e2e";
+        var repoName = $"e2e-gf-{Guid.NewGuid():N}"[..18];
+
+        try
+        {
+            // Self-contained repository: only the junit group is reachable through this proxy.
+            await e2e.Client.CreateAsync(new MavenRepositoryV1Alpha1
+            {
+                ApiVersion = "maven.operator.io/v1alpha1",
+                Kind       = "MavenRepository",
+                Metadata   = new V1ObjectMeta { Name = repoName, NamespaceProperty = ns },
+                Spec = new MavenRepositorySpec
+                {
+                    Type     = RepositoryType.Proxy,
+                    Upstream = new UpstreamSpec
+                    {
+                        Url          = "https://repo1.maven.org/maven2",
+                        CacheTtl     = "1d",
+                        GroupFilters = ["junit"],
+                    },
+                    Metrics = new MetricsSpec { Enabled = false },
+                    Auth   = new AuthSpec
+                    {
+                        Download = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                        Upload   = new AuthPolicySpec { Policy = AuthPolicy.Anonymous },
+                    },
+                },
+            }, CancellationToken.None);
+
+            await PodReadinessHelper.WaitForNginxReadyAsync(e2e.Client, ns, repoName);
+
+            var (port, pf) = await PortForwardServiceAsync($"{repoName}-svc");
+            try
+            {
+                using var client = new HttpClient
+                {
+                    BaseAddress = new Uri($"http://localhost:{port}"),
+                    Timeout     = TimeSpan.FromSeconds(120),
+                };
+
+                // Allowed group → 200 with the upstream body.
+                using (var resp = await client.GetAsync(
+                           $"/repository/{repoName}/junit/junit/4.13.2/junit-4.13.2.jar"))
+                {
+                    resp.StatusCode.ShouldBe(HttpStatusCode.OK,
+                        $"allowed-group GET should return 200, got {(int)resp.StatusCode}");
+                    (await resp.Content.ReadAsByteArrayAsync()).Length.ShouldBeGreaterThan(0);
+                }
+
+                // Denied group → 403 from the filter fallback (not forwarded upstream).
+                using (var resp = await client.GetAsync(
+                           $"/repository/{repoName}/org/apache/maven/core/3.9.9/maven-core-3.9.9.pom"))
+                {
+                    ((int)resp.StatusCode).ShouldBe(403,
+                        $"denied-group GET should return 403, got {(int)resp.StatusCode}");
+                }
+
+                // Health endpoint is unaffected by the filter.
+                using (var resp = await client.GetAsync("/healthz"))
+                    ((int)resp.StatusCode).ShouldBe(200);
+            }
+            finally
+            {
+                KillPf(pf);
+            }
+        }
+        finally
+        {
+            try { await e2e.Client.DeleteAsync<MavenRepositoryV1Alpha1>(repoName, ns, CancellationToken.None); } catch { }
+        }
+    }
+
+    /// <summary>Port-forwards a service in the maven-e2e namespace to a free local port.</summary>
+    private static async Task<(int Port, Process Process)> PortForwardServiceAsync(string svcName)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var localPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+
+        var psi = new ProcessStartInfo
+        {
+            FileName               = "kubectl",
+            Arguments              = $"port-forward svc/{svcName} {localPort}:80 -n maven-e2e",
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+        };
+        var process = new Process { StartInfo = psi };
+        process.Start();
+
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var tcp = new TcpClient();
+                await tcp.ConnectAsync(IPAddress.Loopback, localPort);
+                return (localPort, process);
+            }
+            catch { await Task.Delay(500); }
+        }
+        KillPf(process);
+        throw new TimeoutException($"port-forward to svc/{svcName} did not come up.");
+    }
+
+    private static void KillPf(Process? pf)
+    {
+        try { if (pf is not null && !pf.HasExited) pf.Kill(entireProcessTree: true); } catch { }
+        pf?.Dispose();
     }
 }
 

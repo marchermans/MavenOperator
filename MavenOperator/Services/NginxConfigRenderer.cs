@@ -15,6 +15,11 @@ public interface INginxConfigRenderer
         string? pathPrefix = null);
 
     /// <summary>Renders the NGINX configuration for a Proxy repository.</summary>
+    /// <param name="groupFilters">
+    /// Optional allow-list of group-filter patterns (see <c>UpstreamSpec.GroupFilters</c>).
+    /// When non-empty, the repository location becomes a regex location that only matches
+    /// allowed artifact paths; everything else under the prefix is denied with 403.
+    /// </param>
     string RenderProxy(
         string name,
         AuthPolicy downloadPolicy,
@@ -27,7 +32,8 @@ public interface INginxConfigRenderer
         bool uploadEnabled = false,
         ProxyUploadMode uploadMode = ProxyUploadMode.Passthrough,
         AuthPolicy uploadPolicy = AuthPolicy.Authenticated,
-        string upstreamUploadAuthHeader = "");
+        string upstreamUploadAuthHeader = "",
+        IReadOnlyList<string>? groupFilters = null);
 
     /// <summary>
     /// Returns the content of the mtail program ConfigMap (maven.mtail).
@@ -112,7 +118,8 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         bool uploadEnabled = false,
         ProxyUploadMode uploadMode = ProxyUploadMode.Passthrough,
         AuthPolicy uploadPolicy = AuthPolicy.Authenticated,
-        string upstreamUploadAuthHeader = "")
+        string upstreamUploadAuthHeader = "",
+        IReadOnlyList<string>? groupFilters = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentException.ThrowIfNullOrWhiteSpace(upstreamUrl);
@@ -122,6 +129,60 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
         var regexPrefix = locationPathPrefix == "/"
             ? "/"
             : System.Text.RegularExpressions.Regex.Escape(locationPathPrefix);
+
+        // ── Group filters (optional allow-list) ───────────────────────
+        // When present, the repository prefix location becomes a regex location that
+        // only matches artifact paths covered by at least one pattern; the renderer
+        // additionally emits a 403 fallback for everything else under the prefix.
+        string groupFilterRegex = string.Empty;
+        string locationDirective = locationPathPrefix;
+        if (groupFilters is not null)
+        {
+            if (groupFilters.Count == 0)
+                throw new ArgumentException(
+                    "upstream.groupFilters must contain at least one pattern when provided. Omit the field to disable filtering.",
+                    nameof(groupFilters));
+
+            var patterns = new List<string>(groupFilters.Count);
+            for (int i = 0; i < groupFilters.Count; i++)
+            {
+                var pattern = groupFilters[i];
+                if (string.IsNullOrWhiteSpace(pattern))
+                    throw new ArgumentException(
+                        $"upstream.groupFilters[{i}] must not be empty.", nameof(groupFilters));
+                // NGINX reads a regex location up to the next whitespace — reject any
+                // whitespace so a pattern can never silently truncate or corrupt the config line.
+                if (pattern.Any(char.IsWhiteSpace))
+                    throw new ArgumentException(
+                        $"upstream.groupFilters[{i}] contains whitespace, which is not allowed in NGINX regex locations: '{pattern}'.",
+                        nameof(groupFilters));
+                // Patterns are matched against the path AFTER the repository base prefix.
+                if (pattern.StartsWith('/'))
+                    throw new ArgumentException(
+                        $"upstream.groupFilters[{i}] must not start with '/' — patterns match the artifact path after the repository base prefix: '{pattern}'.",
+                        nameof(groupFilters));
+                try
+                {
+                    _ = new System.Text.RegularExpressions.Regex(pattern);
+                }
+                catch (ArgumentException ex)
+                {
+                    throw new ArgumentException(
+                        $"upstream.groupFilters[{i}] is not a valid regular expression: {ex.Message}",
+                        nameof(groupFilters), ex);
+                }
+                patterns.Add(pattern);
+            }
+
+            // Each pattern gets its own non-capturing group so user-level alternation/
+            // grouping cannot leak into the outer join, and the whole list is wrapped in a
+            // single group so PCRE top-level '|' can never detach the '^' anchor.
+            // locationPathPrefix already carries the trailing separator ("/repo/x/", or "/"
+            // for the host root), which doubles as the boundary before the coordinate path.
+            var alternation = string.Join("|", patterns.Select(p => $"(?:{p})"));
+            groupFilterRegex = "^" + System.Text.RegularExpressions.Regex.Escape(locationPathPrefix) + "(?:" + alternation + ")";
+            locationDirective = "~ " + groupFilterRegex;
+        }
 
         var uri = new Uri(upstreamUrl.TrimEnd('/'));
         var upstreamSchemeHost = $"{uri.Scheme}://{uri.Authority}";
@@ -143,6 +204,8 @@ public sealed class NginxConfigRenderer : INginxConfigRenderer
             download_auth_proxy_enabled = downloadAuthProxyEnabled,
             path_prefix = resolvedPathPrefix,
             location_path_prefix = locationPathPrefix,
+            location_directive   = locationDirective,
+            group_filter_regex   = groupFilterRegex,
             path_prefix_regex = regexPrefix,
             upload_enabled        = uploadEnabled,
             upload_mode           = uploadMode.ToString(),

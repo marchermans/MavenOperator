@@ -262,6 +262,121 @@ public sealed class NginxProxyConfigRendererTests
         result.ShouldContain("return 405;");
         result.ShouldNotContain("auth_basic");
     }
+
+    // ── Group filters (upstream.groupFilters) ────────────────────────────────
+
+    [Fact]
+    public void RenderProxy_NoGroupFilters_RendersPlainPrefixLocationAndNo403Fallback()
+    {
+        var result = _sut.RenderProxy("central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "");
+
+        result.ShouldContain("location /repository/central/ {");
+        // No regex allow-list location and no filter fallback without groupFilters.
+        result.ShouldNotContain(@"location ~");
+        result.ShouldNotContain("return 403");
+    }
+
+    [Fact]
+    public void RenderProxy_SingleGroupFilter_RendersAnchoredRegexLocationAnd403Fallback()
+    {
+        var result = _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: ["org/apache"]);
+
+        // The repository location becomes an anchored regex allow-list (patterns are
+        // matched against the path after /repository/central/).
+        result.ShouldContain("location ~ ^/repository/central/(?:(?:org/apache)) {");
+        // Everything else under the prefix is denied with 403 via a plain prefix fallback.
+        result.ShouldContain("return 403");
+        result.ShouldContain("location /repository/central/ {");
+
+        // The proxy body (auth, cache, forwarding) must be intact inside the regex location.
+        result.ShouldContain($"proxy_pass $rs_up_url_central;");
+    }
+
+    [Fact]
+    public void RenderProxy_MultipleGroupFilters_JoinsPatternsAsAlternation()
+    {
+        var result = _sut.RenderProxy(
+            "corp-proxy", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: ["org/apache", "com/example.*"]);
+
+        // The alternation keeps each pattern in its own non-capturing group so user-level
+        // grouping cannot leak out, and the whole list is wrapped to protect the '^' anchor.
+        result.ShouldContain("location ~ ^/repository/corp-proxy/(?:(?:org/apache)|(?:com/example.*)) {");
+    }
+
+    [Fact]
+    public void RenderProxy_GroupFiltersWithRootPathPrefix_AnchorsAfterLeadingSlash()
+    {
+        var result = _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            pathPrefix: "/",
+            groupFilters: ["org/apache"]);
+
+        // Root prefix ("/") → the pattern anchors right after the leading slash.
+        result.ShouldContain(@"location ~ ^/(?:(?:org/apache)) {");
+        result.ShouldContain("return 403");
+    }
+
+    [Fact]
+    public void RenderProxy_GroupFilterPreservesUploadForwardingInRegexLocation()
+    {
+        var result = _sut.RenderProxy(
+            "my-proxy", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            uploadEnabled: true,
+            groupFilters: ["org/apache"]);
+
+        // Upload forwarding directives must live inside the filtered location.
+        result.ShouldContain("location ~ ^/repository/my-proxy/(?:(?:org/apache)) {");
+        result.ShouldContain("limit_except GET HEAD OPTIONS");
+    }
+
+    [Fact]
+    public void RenderProxy_GroupFilterEmptyList_Throws()
+    {
+        Should.Throw<ArgumentException>(() => _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: Array.Empty<string>()));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void RenderProxy_GroupFilterEmptyEntry_Throws(string entry)
+    {
+        Should.Throw<ArgumentException>(() => _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: new[] { entry }));
+    }
+
+    [Fact]
+    public void RenderProxy_GroupFilterContainingWhitespace_Throws()
+    {
+        // NGINX reads a regex location up to the next whitespace — such entries must be rejected.
+        Should.Throw<ArgumentException>(() => _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: ["org/ apache"]));
+    }
+
+    [Fact]
+    public void RenderProxy_GroupFilterWithLeadingSlash_Throws()
+    {
+        // Patterns match the artifact path AFTER the repository base prefix.
+        Should.Throw<ArgumentException>(() => _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: ["/org/apache"]));
+    }
+
+    [Theory]
+    [InlineData("(")]
+    [InlineData("*bad")]
+    public void RenderProxy_GroupFilterInvalidRegex_Throws(string entry)
+    {
+        Should.Throw<ArgumentException>(() => _sut.RenderProxy(
+            "central", AuthPolicy.Anonymous, UpstreamUrl, "1d", "",
+            groupFilters: new[] { entry }));
+    }
 }
 
 

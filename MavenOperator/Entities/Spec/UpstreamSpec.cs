@@ -36,6 +36,20 @@ public sealed class UpstreamSpec
     public string? CacheStorageClass { get; set; }
 
     /// <summary>
+    /// Optional allow-list of group filters for Proxy repositories.
+    /// Each entry is a PCRE2 regular expression matched against the repository-relative
+    /// artifact path — the Maven coordinates part after the base URL prefix, e.g.
+    /// "org/apache/maven/core/3.9.0". Patterns are anchored at the start of that relative
+    /// path and match as prefixes (an unanchored tail matches any continuation). Group IDs
+    /// use slashes for dots in URL paths, so a group prefix like org.apache is written
+    /// "org/apache".
+    /// When set (non-empty), only artifacts whose relative path matches at least one pattern
+    /// are reachable through this proxy; all other requests under the repository prefix are
+    /// rejected with HTTP 403 instead of being forwarded to the upstream.
+    /// </summary>
+    public List<string>? GroupFilters { get; set; }
+
+    /// <summary>
     /// Upload forwarding configuration for Proxy repositories.
     /// When enabled, PUT/DELETE requests are forwarded to the upstream using fixed credentials.
     /// Defaults to disabled (read-only cache).
