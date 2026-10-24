@@ -447,25 +447,6 @@ public sealed class KubernetesResourceManager(
             var existing = await client.GetAsync<V1Deployment>(deploymentName, ns, ct);
             if (existing is not null)
             {
-                var currentAnnotations = existing.Spec?.Template?.Metadata?.Annotations;
-
-                // Changed when any desired key is missing/different, or a stale
-                // managed hash annotation lingers (e.g. after migrating from the
-                // single composite "config" hash to per-component hashes).
-                var changedKinds = configHashes
-                    .Where(kv => currentAnnotations?.TryGetValue(HashAnnotationKey(kv.Key), out var v) != true || v != kv.Value)
-                    .Select(kv => kv.Key)
-                    .Concat(currentAnnotations?.
-                        Where(aa => IsManagedHashAnnotation(aa.Key) && !desiredAnnotations.ContainsKey(aa.Key))
-                        .Select(aa => aa.Key) ?? [])
-                    .ToList();
-
-                if (changedKinds.Count == 0)
-                {
-                    logger.LogDebug("Deployment {Namespace}/{Name} config unchanged", ns, deploymentName);
-                    return existing;
-                }
-
                 try
                 {
                     // Config changed — update annotations to trigger rolling restart.
@@ -484,8 +465,8 @@ public sealed class KubernetesResourceManager(
 
                     var updated = await client.UpdateAsync(existing, ct);
                     logger.LogInformation(
-                        "Updated Deployment {Namespace}/{Name} (changed config hashes: {Kinds})",
-                        ns, deploymentName, string.Join(", ", changedKinds));
+                        "Updated Deployment {Namespace}/{Name})",
+                        ns, deploymentName);
                     return updated;
                 }
                 catch (HttpOperationException ex) when (IsConflict(ex))
